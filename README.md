@@ -4,17 +4,17 @@ Script Python ringan untuk mengecek hasil **SCC (Service Completion Check)** Tel
 
 ---
 
-## 🚀 Instalasi
+## 🚀 Instalasi & Requirements
 
 ### Android (Termux)
 ```bash
-pkg update && pkg install python
-pip install requests
+pkg update && pkg install git python -y
+pip install -r requirements.txt
 ```
 
 ### Windows / Linux / macOS
 ```bash
-pip install requests
+pip install -r requirements.txt
 ```
 
 ---
