@@ -612,7 +612,7 @@ def _menu_speedtest() -> tuple:
     print("  [2] Input manual (masukkan nilai Mbps sendiri)")
     print("  [3] Auto dari paket PCRF (+ random noise)")
     print("  [4] Lewati (tidak cek kecepatan)")
-    pilihan = _input("  Pilih", default="4")
+    pilihan = _input("  Pilih", default="3")
 
     if pilihan == "1":
         return True, False, None, None, 10.0, 1.0
