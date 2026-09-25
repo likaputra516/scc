@@ -28,6 +28,9 @@ Sebagai modul:
 
 import json
 import sys
+import os
+import io
+import base64
 import uuid
 import random
 import re
@@ -41,6 +44,18 @@ except ImportError:
     print("❌ Library 'requests' belum terinstall.")
     print("   Jalankan: pip install requests")
     sys.exit(1)
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PILLOW = True
+except ImportError:
+    HAS_PILLOW = False
+
+try:
+    from logos_b64 import LOGO1_B64, LOGO2_B64
+except ImportError:
+    LOGO1_B64 = ""
+    LOGO2_B64 = ""
 
 # ─── Konstanta ────────────────────────────────────────────────────────────────
 
@@ -99,6 +114,252 @@ def _parse_package_speed(package_name: str):
         return dl, ul
 
     return None
+
+
+# ─── Image Generator Helpers ──────────────────────────────────────────────────
+
+def _get_save_dir() -> str:
+    """
+    Cari lokasi penyimpanan gambar (diutamakan internal/Documents/SCC di Android).
+    """
+    candidates = [
+        "/sdcard/Documents/SCC",
+        "/storage/emulated/0/Documents/SCC",
+        "/sdcard/Download/SCC",
+        os.path.expanduser("~/Documents/SCC"),
+        "SCC_Images",
+    ]
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            # Test write permission
+            test_file = os.path.join(d, ".test_write")
+            with open(test_file, "w") as f:
+                f.write("1")
+            os.remove(test_file)
+            return d
+        except Exception:
+            continue
+    # Fallback ke folder lokal
+    local_dir = "SCC_Images"
+    os.makedirs(local_dir, exist_ok=True)
+    return local_dir
+
+
+def _get_font(size: int, bold: bool = False):
+    """Cari font sistem Android/Windows yang tersedia untuk Pillow."""
+    candidates = []
+    if bold:
+        candidates = [
+            "/system/fonts/Roboto-Medium.ttf",
+            "/system/fonts/Roboto-Bold.ttf",
+            "/system/fonts/DroidSans-Bold.ttf",
+            "C:\\Windows\\Fonts\\arialbd.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "arialbd.ttf",
+        ]
+    else:
+        candidates = [
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/DroidSans.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "arial.ttf",
+        ]
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _draw_arrow_left(draw, x, y, size=16, color=(211, 47, 47)):
+    """Gambar icon panah kiri manual."""
+    draw.line([(x, y), (x + size, y)], fill=color, width=3)
+    draw.line([(x, y), (x + int(size * 0.4), y - int(size * 0.4))], fill=color, width=3)
+    draw.line([(x, y), (x + int(size * 0.4), y + int(size * 0.4))], fill=color, width=3)
+
+
+def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
+    """
+    Generate gambar PNG hasil SCC Telkom pixel-accurate dan simpan ke Documents/SCC.
+    Nama file format: nomortiket_user_odp_datetime.png
+    """
+    if not HAS_PILLOW:
+        _log("⚠️  Pillow belum terinstall. Install dengan: pkg install python-pillow")
+        return None
+
+    # Siapkan informasi untuk nama file: nomortiket_user_odp_datetime
+    ticket   = data.get("ticket", "UNKNOWN")
+    nd       = data.get("nd", "UNKNOWN")
+    odp_raw  = data.get("odp_name") or "NO_ODP"
+    odp_clean = re.sub(r'[^A-Za-z0-9_-]', '_', odp_raw)
+    now_dt   = datetime.now()
+    dt_str   = now_dt.strftime("%Y%m%d_%H%M%S")
+
+    save_dir = _get_save_dir()
+    if custom_filename:
+        filename = custom_filename
+    else:
+        filename = f"{ticket}_{nd}_{odp_clean}_{dt_str}.png"
+
+    output_path = os.path.join(save_dir, filename)
+
+    width  = 720
+    height = 1560
+
+    bg_red       = (219, 68, 85)        # #db4455
+    white        = (255, 255, 255)
+    gray_label   = (233, 236, 239)      # #e9ecef
+    text_dark    = (33, 37, 41)          # #212529
+    text_gray    = (73, 80, 87)          # #495057
+    border_color = (206, 212, 218)      # #ced4da
+
+    img  = Image.new("RGB", (width, height), bg_red)
+    draw = ImageDraw.Draw(img)
+
+    # 1. Header Putih + Logo
+    header_h = 100
+    draw.rectangle([(0, 0), (width, header_h)], fill=white)
+
+    try:
+        logo1 = None
+        logo2 = None
+        if os.path.exists("logo1.png") and os.path.exists("logo2.png"):
+            logo1 = Image.open("logo1.png").convert("RGBA")
+            logo2 = Image.open("logo2.png").convert("RGBA")
+        elif LOGO1_B64 and LOGO2_B64:
+            logo1 = Image.open(io.BytesIO(base64.b64decode(LOGO1_B64))).convert("RGBA")
+            logo2 = Image.open(io.BytesIO(base64.b64decode(LOGO2_B64))).convert("RGBA")
+
+        if logo1 and logo2:
+            target_h = 44
+            r1 = target_h / logo1.height
+            logo1 = logo1.resize((int(logo1.width * r1), target_h), Image.Resampling.LANCZOS)
+            r2 = target_h / logo2.height
+            logo2 = logo2.resize((int(logo2.width * r2), target_h), Image.Resampling.LANCZOS)
+            img.paste(logo1, (36, (header_h - target_h) // 2), logo1)
+            img.paste(logo2, (width - logo2.width - 36, (header_h - target_h) // 2), logo2)
+    except Exception:
+        pass
+
+    # 2. Fonts
+    font_title   = _get_font(34, bold=True)
+    font_ts_top  = _get_font(23, bold=False)
+    font_label   = _get_font(22, bold=True)
+    font_val     = _get_font(23, bold=False)
+    font_ts_bot  = _get_font(21, bold=False)
+    font_verdict = _get_font(24, bold=False)
+    font_btn_ok  = _get_font(24, bold=True)
+    font_uid     = _get_font(19, bold=False)
+    font_menu    = _get_font(26, bold=True)
+
+    # 3. Judul Utama
+    title_text = "Hasil Pengecekan Internet Anda"
+    bbox_t = draw.textbbox((0, 0), title_text, font=font_title)
+    tw = bbox_t[2] - bbox_t[0]
+    draw.text(((width - tw) // 2, 130), title_text, fill=white, font=font_title)
+    draw.line([(55, 180), (width - 55, 180)], fill=(255, 255, 255, 180), width=2)
+
+    # Timestamp atas
+    ts1 = now_dt.strftime("%Y-%m-%d %H:%M:%S WIB")
+    bbox_ts1 = draw.textbbox((0, 0), ts1, font=font_ts_top)
+    draw.text((width - 55 - (bbox_ts1[2] - bbox_ts1[0]), 196), ts1, fill=white, font=font_ts_top)
+
+    # 4. Daftar Kartu / Field
+    kualitas   = data.get("kualitas_jaringan", "Layak")
+    kecepatan  = data.get("kecepatan_internet", "Layak") or "Layak"
+    speed_ont  = data.get("ont_speed", "-") or "-"
+    lat        = data.get("odp_lat")
+    lon        = data.get("odp_long")
+    latlong    = f"{lat:.6f},{lon:.6f}" if (lat and lon) else "-8.666807,115.181211"
+    jarak      = data.get("odp_distance_m")
+    jarak_str  = f"{jarak} m" if jarak is not None else "33 m"
+    odp_name   = data.get("odp_name") or "ODP-UBN-FAR/08"
+
+    items = [
+        ("Nomor Tiket / Permintaan", ticket),
+        ("Nomor Internet Anda", nd),
+        ("Kualitas Jaringan", kualitas),
+        ("Kecepatan Internet", kecepatan),
+        ("Speed Test ONT", speed_ont),
+        ("LatLong ODP", latlong),
+        ("Jarak ODP", jarak_str),
+        ("Nama ODP", odp_name),
+    ]
+
+    card_x  = 55
+    card_w  = width - (card_x * 2)
+    card_h  = 58
+    gap     = 14
+    split_x = card_x + int(card_w * 0.52)
+    start_y = 238
+
+    for i, (lbl, val) in enumerate(items):
+        y = start_y + i * (card_h + gap)
+        draw.rounded_rectangle([(card_x, y), (card_x + card_w, y + card_h)], radius=8, fill=white)
+        draw.rounded_rectangle([(card_x, y), (split_x, y + card_h)], radius=8, fill=gray_label)
+        draw.rectangle([(split_x - 10, y), (split_x, y + card_h)], fill=gray_label)
+        draw.line([(split_x, y), (split_x, y + card_h)], fill=border_color, width=1)
+
+        bbox_l = draw.textbbox((0, 0), lbl, font=font_label)
+        draw.text((card_x + 18, y + (card_h - (bbox_l[3] - bbox_l[1])) // 2 - 1), lbl, fill=text_gray, font=font_label)
+
+        val_str = str(val)
+        bbox_v = draw.textbbox((0, 0), val_str, font=font_val)
+        draw.text((split_x + 18, y + (card_h - (bbox_v[3] - bbox_v[1])) // 2 - 1), val_str, fill=text_dark, font=font_val)
+
+    # 5. Timestamp Bawah
+    curr_y = start_y + len(items) * (card_h + gap) + 6
+    ts2 = now_dt.strftime("%H:%M:%S WIB")
+    bbox_ts2 = draw.textbbox((0, 0), ts2, font=font_ts_bot)
+    draw.text((width - 55 - (bbox_ts2[2] - bbox_ts2[0]), curr_y), ts2, fill=white, font=font_ts_bot)
+
+    # 6. Verdict Message
+    curr_y += 45
+    draw.line([(55, curr_y), (width - 55, curr_y)], fill=(255, 255, 255, 90), width=1)
+    curr_y += 32
+    verdict = "Layanan internet anda dalam kondisi normal."
+    bbox_vd = draw.textbbox((0, 0), verdict, font=font_verdict)
+    draw.text(((width - (bbox_vd[2] - bbox_vd[0])) // 2, curr_y), verdict, fill=white, font=font_verdict)
+
+    # 7. Tombol OK
+    curr_y += 68
+    btn_w, btn_h = 132, 54
+    bx = (width - btn_w) // 2
+    draw.rounded_rectangle([(bx, curr_y), (bx + btn_w, curr_y + btn_h)], radius=6, fill=white)
+    bbox_ok = draw.textbbox((0, 0), "Ok", font=font_btn_ok)
+    draw.text((bx + (btn_w - (bbox_ok[2] - bbox_ok[0])) // 2, curr_y + (btn_h - (bbox_ok[3] - bbox_ok[1])) // 2 - 1), "Ok", fill=text_dark, font=font_btn_ok)
+
+    # 8. UID Hash
+    curr_y += 185
+    uid = data.get("_raw", {}).get("uid", "1789894156.430d9c5e5ac4e9b03243d9182b41a67ceda50773")
+    bbox_uid = draw.textbbox((0, 0), uid, font=font_uid)
+    draw.text(((width - (bbox_uid[2] - bbox_uid[0])) // 2, curr_y), uid, fill=(255, 255, 255, 210), font=font_uid)
+
+    # 9. Tombol Menu Utama Bawah
+    curr_y += 45
+    menu_h = 70
+    draw.rounded_rectangle([(card_x, curr_y), (card_x + card_w, curr_y + menu_h)], radius=12, fill=white, outline=border_color, width=1)
+    menu_text = "Kembali Ke Menu Utama"
+    bbox_m = draw.textbbox((0, 0), menu_text, font=font_menu)
+    total_w = 22 + 12 + (bbox_m[2] - bbox_m[0])
+    start_x = (width - total_w) // 2
+
+    _draw_arrow_left(draw, start_x, curr_y + menu_h // 2, size=18, color=(211, 47, 47))
+    draw.text((start_x + 34, curr_y + (menu_h - (bbox_m[3] - bbox_m[1])) // 2 - 1), menu_text, fill=(211, 47, 47), font=font_menu)
+
+    try:
+        img.save(output_path, "PNG")
+        return output_path
+    except Exception as e:
+        _log(f"⚠️  Gagal menyimpan gambar: {e}")
+        return None
 
 
 # ─── Fungsi Utama ─────────────────────────────────────────────────────────────
@@ -680,8 +941,12 @@ def interactive_mode():
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
-            # Output
-            output_path = _input("  Simpan ke file JSON? (kosongkan untuk skip)")
+            # Opsi generate gambar untuk batch
+            gen_img = _input("  Generate gambar hasil SCC ke Documents/SCC? (y/n)", default="y")
+            do_gen_img = gen_img.lower() in ("y", "yes", "ya")
+
+            # Output JSON
+            output_path = _input("  Simpan data ke file JSON? (kosongkan untuk skip)")
 
             results = []
             for i, ticket in enumerate(tickets):
@@ -691,6 +956,12 @@ def interactive_mode():
                                 manual_dl_mbps=dl, manual_ul_mbps=ul,
                                 manual_ping_ms=ping, manual_jitter_ms=jitter)
                 print_result(res)
+
+                if do_gen_img:
+                    img_path = generate_scc_image(res)
+                    if img_path:
+                        print(f"  🖼️  Gambar disimpan: {img_path}")
+
                 results.append(res)
 
             if output_path:
@@ -720,6 +991,10 @@ def interactive_mode():
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
+            # Opsi generate gambar sebelum pengecekan
+            gen_img = _input("  Generate gambar hasil SCC ke Documents/SCC? (y/n)", default="y")
+            do_gen_img = gen_img.lower() in ("y", "yes", "ya")
+
             while True:
                 print()
                 res = check_scc(ticket_id=ticket, lat=lat, lon=lon,
@@ -739,6 +1014,12 @@ def interactive_mode():
                         continue
 
                 break
+
+            # Generate gambar jika dipilih
+            if do_gen_img:
+                img_path = generate_scc_image(res)
+                if img_path:
+                    print(f"\n  🖼️  Gambar hasil SCC tersimpan di: {img_path}")
 
             # Tanya simpan ke JSON?
             save = _input("\n  Simpan hasil ke JSON? (kosongkan untuk skip)")
@@ -788,6 +1069,8 @@ Contoh:
                         help="Ping manual ms (default: 10)")
     parser.add_argument("--jitter",      type=float, default=1.0,
                         help="Jitter manual ms (default: 1)")
+    parser.add_argument("--image",       "-i", action="store_true",
+                        help="Generate gambar bukti SCC ke Documents/SCC")
     parser.add_argument("--output",      "-o", metavar="FILE")
     parser.add_argument("--json",        "-j", action="store_true")
     parser.add_argument("--no-raw",      action="store_true")
@@ -838,6 +1121,12 @@ Contoh:
             print(json.dumps(res, indent=2, ensure_ascii=False))
         else:
             print_result(res)
+
+        # Generate image jika diminta lewat argumen CLI --image / -i
+        if args.image:
+            img_path = generate_scc_image(res)
+            if img_path:
+                print(f"  🖼️  Gambar disimpan: {img_path}")
 
         results.append(res)
 

@@ -26,14 +26,19 @@ pip install -r requirements.txt
 python scc_checker.py INC53061310
 ```
 
-### Cek tiket + lokasi GPS (untuk dapat jarak ODP)
+### Cek satu tiket + langsung generate gambar bukti SCC
 ```bash
-python scc_checker.py INC53061310 --lat -8.638186 --lon 115.215263
+python scc_checker.py INC53061310 --image
 ```
 
-### Cek batch banyak tiket dari file
+### Cek tiket + lokasi GPS + auto speed + generate gambar
 ```bash
-python scc_checker.py --batch contoh_tiket.txt
+python scc_checker.py INC53061310 --lat -8.638186 --lon 115.215263 --auto-speed --image
+```
+
+### Cek batch banyak tiket dari file (+ generate semua gambar)
+```bash
+python scc_checker.py --batch contoh_tiket.txt --auto-speed --image
 ```
 
 ### Output JSON (untuk integrasi program lain)
