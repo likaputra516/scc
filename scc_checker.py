@@ -277,10 +277,10 @@ def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
     speed_ont  = data.get("ont_speed", "-") or "-"
     lat        = data.get("odp_lat")
     lon        = data.get("odp_long")
-    latlong    = f"{lat:.6f},{lon:.6f}" if (lat and lon) else "-8.666807,115.181211"
+    latlong    = f"{lat:.6f},{lon:.6f}" if (lat and lon) else "-"
     jarak      = data.get("odp_distance_m")
-    jarak_str  = f"{jarak} m" if jarak is not None else "33 m"
-    odp_name   = data.get("odp_name") or "ODP-UBN-FAR/08"
+    jarak_str  = f"{jarak} m" if jarak is not None else "0 m"
+    odp_name   = data.get("odp_name") or "-"
 
     items = [
         ("Nomor Tiket / Permintaan", ticket),
