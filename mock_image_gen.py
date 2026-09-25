@@ -1,80 +1,120 @@
 """
-Image Mock Generator untuk SCC Telkom menggunakan Pillow (Pure Python)
-Menghasilkan file gambar PNG yang persis dengan tampilan asli web SCC.
+Image Mock Generator untuk SCC Telkom v2
+Kalibrasi pixel-perfect dengan font sistem Android (Roboto) agar identik 100% dengan aslinya.
 """
 
+import os
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
+def get_font(size: int, bold: bool = False):
+    """
+    Cari font sistem Android/Windows yang tersedia.
+    """
+    candidates = []
+    if bold:
+        candidates = [
+            "/system/fonts/Roboto-Medium.ttf",
+            "/system/fonts/Roboto-Bold.ttf",
+            "/system/fonts/DroidSans-Bold.ttf",
+            "C:\\Windows\\Fonts\\arialbd.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "arialbd.ttf",
+        ]
+    else:
+        candidates = [
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/DroidSans.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "arial.ttf",
+        ]
+        
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                pass
+                
+    # Fallback jika tidak ada file font spesifik
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size)
+    except Exception:
+        return ImageFont.load_default()
+
+def draw_arrow_left(draw, x, y, size=16, color=(211, 47, 47)):
+    """Gambar icon panah kiri manual agar tidak bergantung pada glyph font."""
+    # Garis tengah horizontal
+    draw.line([(x, y), (x + size, y)], fill=color, width=3)
+    # Sayap atas panah
+    draw.line([(x, y), (x + int(size * 0.4), y - int(size * 0.4))], fill=color, width=3)
+    # Sayap bawah panah
+    draw.line([(x, y), (x + int(size * 0.4), y + int(size * 0.4))], fill=color, width=3)
+
 def generate_scc_image(data: dict, output_file: str = "mock_scc.png") -> str:
-    # Ukuran kanvas menyerupai rasio layar smartphone (lebar 720, tinggi 1560)
+    # Resolusi standar layar smartphone: 720 x 1560
     width = 720
     height = 1560
     
-    # Warna palet
-    bg_red = (219, 68, 85)       # #db4455
+    # Warna palet asli SCC Telkom
+    bg_red = (219, 68, 85)        # #db4455
     white = (255, 255, 255)
-    gray_label = (233, 236, 239) # #e9ecef
-    text_dark = (40, 40, 40)
-    text_gray = (73, 80, 87)
-    border_color = (206, 212, 218)
+    gray_label = (233, 236, 239)  # #e9ecef
+    text_dark = (33, 37, 41)      # #212529
+    text_gray = (73, 80, 87)      # #495057
+    border_color = (206, 212, 218)# #ced4da
     
-    # Buat image kanvas
     img = Image.new("RGB", (width, height), bg_red)
     draw = ImageDraw.Draw(img)
     
-    # 1. Header Bar Logo (Tinggi 110px)
-    draw.rectangle([(0, 0), (width, 110)], fill=white)
-    draw.line([(0, 110), (width, 110)], fill=border_color, width=1)
+    # ── 1. Header Putih + Logo (Tinggi 100px) ─────────────────────────────
+    header_h = 100
+    draw.rectangle([(0, 0), (width, header_h)], fill=white)
     
-    # Tempelkan Logo
     try:
         logo1 = Image.open("logo1.png").convert("RGBA")
         logo2 = Image.open("logo2.png").convert("RGBA")
         
-        # Resize logo proporsional
-        ratio1 = 56 / logo1.height
-        logo1 = logo1.resize((int(logo1.width * ratio1), 56), Image.Resampling.LANCZOS)
+        target_h = 44
+        r1 = target_h / logo1.height
+        logo1 = logo1.resize((int(logo1.width * r1), target_h), Image.Resampling.LANCZOS)
         
-        ratio2 = 56 / logo2.height
-        logo2 = logo2.resize((int(logo2.width * ratio2), 56), Image.Resampling.LANCZOS)
+        r2 = target_h / logo2.height
+        logo2 = logo2.resize((int(logo2.width * r2), target_h), Image.Resampling.LANCZOS)
         
-        img.paste(logo1, (36, 27), logo1)
-        img.paste(logo2, (width - logo2.width - 36, 27), logo2)
+        img.paste(logo1, (36, (header_h - target_h) // 2), logo1)
+        img.paste(logo2, (width - logo2.width - 36, (header_h - target_h) // 2), logo2)
     except Exception:
-        pass # jika logo tidak ada, biarkan putih
-        
-    # Fonts
-    try:
-        font_title = ImageFont.truetype("arial.ttf", 36)
-        font_ts = ImageFont.truetype("arial.ttf", 22)
-        font_label = ImageFont.truetype("arial.ttf", 22)
-        font_val = ImageFont.truetype("arial.ttf", 22)
-        font_verdict = ImageFont.truetype("arial.ttf", 24)
-        font_btn = ImageFont.truetype("arial.ttf", 24)
-        font_uid = ImageFont.truetype("arial.ttf", 18)
-        font_bottom = ImageFont.truetype("arialbd.ttf", 26)
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_ts = font_label = font_val = font_verdict = font_btn = font_uid = font_bottom = font_title
+        pass
 
-    # 2. Judul Utama
+    # ── Load Fonts Berdasarkan Skala ──────────────────────────────────────
+    font_title   = get_font(34, bold=True)
+    font_ts_top  = get_font(23, bold=False)
+    font_label   = get_font(22, bold=True)
+    font_val     = get_font(23, bold=False)
+    font_ts_bot  = get_font(21, bold=False)
+    font_verdict = get_font(24, bold=False)
+    font_btn_ok  = get_font(24, bold=True)
+    font_uid     = get_font(19, bold=False)
+    font_menu    = get_font(26, bold=True)
+
+    # ── 2. Judul Utama ───────────────────────────────────────────────────
     title_text = "Hasil Pengecekan Internet Anda"
-    bbox = draw.textbbox((0, 0), title_text, font=font_title)
-    t_w = bbox[2] - bbox[0]
-    draw.text(((width - t_w) // 2, 145), title_text, fill=white, font=font_title)
+    bbox_t = draw.textbbox((0, 0), title_text, font=font_title)
+    tw = bbox_t[2] - bbox_t[0]
+    draw.text(((width - tw) // 2, 130), title_text, fill=white, font=font_title)
     
-    # Garis bawah judul
-    draw.line([(50, 195), (width - 50, 195)], fill=(255, 255, 255, 180), width=2)
+    # Garis tipis bawah judul
+    draw.line([(55, 180), (width - 55, 180)], fill=(255, 255, 255, 180), width=2)
     
     # Timestamp atas
     now = datetime.now()
     ts1 = now.strftime("%Y-%m-%d %H:%M:%S WIB")
-    bbox_ts = draw.textbbox((0, 0), ts1, font=font_ts)
-    ts_w = bbox_ts[2] - bbox_ts[0]
-    draw.text((width - ts_w - 50, 210), ts1, fill=white, font=font_ts)
-    
-    # 3. Kotak Data
+    bbox_ts1 = draw.textbbox((0, 0), ts1, font=font_ts_top)
+    draw.text((width - 55 - (bbox_ts1[2] - bbox_ts1[0]), 196), ts1, fill=white, font=font_ts_top)
+
+    # ── 3. Daftar Kartu / Field ──────────────────────────────────────────
     ticket = data.get("ticket", "-")
     nd = data.get("nd", "-")
     kualitas = data.get("kualitas_jaringan", "Layak")
@@ -99,70 +139,77 @@ def generate_scc_image(data: dict, output_file: str = "mock_scc.png") -> str:
         ("Jarak ODP", jarak_str),
         ("Nama ODP", odp_name),
     ]
-    
-    start_y = 250
-    card_h = 56
+
+    card_x = 55
+    card_w = width - (card_x * 2)
+    card_h = 58
     gap = 14
-    margin_x = 50
-    split_x = margin_x + 320
-    card_w = width - (margin_x * 2)
-    
-    for i, (label, val) in enumerate(items):
+    split_x = card_x + int(card_w * 0.52)
+    start_y = 238
+
+    for i, (lbl, val) in enumerate(items):
         y = start_y + i * (card_h + gap)
         
-        # Background kanan (putih)
-        draw.rounded_rectangle([(margin_x, y), (margin_x + card_w, y + card_h)], radius=8, fill=white)
-        # Background kiri (abu-abu label)
-        draw.rounded_rectangle([(margin_x, y), (split_x, y + card_h)], radius=8, fill=gray_label)
-        # Rapikan sudut kanan label agar rata
+        # Background kartu kanan (putih)
+        draw.rounded_rectangle([(card_x, y), (card_x + card_w, y + card_h)], radius=8, fill=white)
+        # Background label kiri (abu-abu)
+        draw.rounded_rectangle([(card_x, y), (split_x, y + card_h)], radius=8, fill=gray_label)
         draw.rectangle([(split_x - 10, y), (split_x, y + card_h)], fill=gray_label)
-        # Garis batas vertikal
         draw.line([(split_x, y), (split_x, y + card_h)], fill=border_color, width=1)
         
-        # Teks Label
-        draw.text((margin_x + 16, y + 16), label, fill=text_gray, font=font_label)
-        # Teks Value
-        draw.text((split_x + 16, y + 16), str(val), fill=text_dark, font=font_val)
+        # Label teks
+        bbox_l = draw.textbbox((0, 0), lbl, font=font_label)
+        draw.text((card_x + 18, y + (card_h - (bbox_l[3] - bbox_l[1])) // 2 - 1), lbl, fill=text_gray, font=font_label)
+        
+        # Value teks
+        val_str = str(val)
+        bbox_v = draw.textbbox((0, 0), val_str, font=font_val)
+        draw.text((split_x + 18, y + (card_h - (bbox_v[3] - bbox_v[1])) // 2 - 1), val_str, fill=text_dark, font=font_val)
 
-    # 4. Timestamp bawah
+    # ── 4. Timestamp Bawah ───────────────────────────────────────────────
+    curr_y = start_y + len(items) * (card_h + gap) + 6
     ts2 = now.strftime("%H:%M:%S WIB")
-    bbox_ts2 = draw.textbbox((0, 0), ts2, font=font_ts)
-    ts2_w = bbox_ts2[2] - bbox_ts2[0]
-    curr_y = start_y + len(items) * (card_h + gap) + 10
-    draw.text((width - ts2_w - 50, curr_y), ts2, fill=white, font=font_ts)
+    bbox_ts2 = draw.textbbox((0, 0), ts2, font=font_ts_bot)
+    draw.text((width - 55 - (bbox_ts2[2] - bbox_ts2[0]), curr_y), ts2, fill=white, font=font_ts_bot)
+
+    # ── 5. Garis Pembatas & Pesan Normal ─────────────────────────────────
+    curr_y += 45
+    draw.line([(55, curr_y), (width - 55, curr_y)], fill=(255, 255, 255, 90), width=1)
     
-    # 5. Verdict
-    curr_y += 50
-    draw.line([(50, curr_y), (width - 50, curr_y)], fill=(255, 255, 255, 80), width=1)
-    curr_y += 30
+    curr_y += 32
     verdict = "Layanan internet anda dalam kondisi normal."
-    bbox_v = draw.textbbox((0, 0), verdict, font=font_verdict)
-    v_w = bbox_v[2] - bbox_v[0]
-    draw.text(((width - v_w) // 2, curr_y), verdict, fill=white, font=font_verdict)
-    
-    # 6. Tombol OK
-    curr_y += 65
-    btn_w = 130
-    btn_h = 50
-    btn_x = (width - btn_w) // 2
-    draw.rounded_rectangle([(btn_x, curr_y), (btn_x + btn_w, curr_y + btn_h)], radius=6, fill=white)
-    bbox_btn = draw.textbbox((0, 0), "Ok", font=font_btn)
-    draw.text((btn_x + (btn_w - (bbox_btn[2] - bbox_btn[0])) // 2, curr_y + 11), "Ok", fill=text_dark, font=font_btn)
-    
-    # 7. UID
-    curr_y += 180
+    bbox_vd = draw.textbbox((0, 0), verdict, font=font_verdict)
+    draw.text(((width - (bbox_vd[2] - bbox_vd[0])) // 2, curr_y), verdict, fill=white, font=font_verdict)
+
+    # ── 6. Tombol OK Putih ───────────────────────────────────────────────
+    curr_y += 68
+    btn_w, btn_h = 132, 54
+    bx = (width - btn_w) // 2
+    draw.rounded_rectangle([(bx, curr_y), (bx + btn_w, curr_y + btn_h)], radius=6, fill=white)
+    bbox_ok = draw.textbbox((0, 0), "Ok", font=font_btn_ok)
+    draw.text((bx + (btn_w - (bbox_ok[2] - bbox_ok[0])) // 2, curr_y + (btn_h - (bbox_ok[3] - bbox_ok[1])) // 2 - 1), "Ok", fill=text_dark, font=font_btn_ok)
+
+    # ── 7. UID Hash ──────────────────────────────────────────────────────
+    curr_y += 185
     uid = data.get("_raw", {}).get("uid", "1789894156.430d9c5e5ac4e9b03243d9182b41a67ceda50773")
     bbox_uid = draw.textbbox((0, 0), uid, font=font_uid)
     draw.text(((width - (bbox_uid[2] - bbox_uid[0])) // 2, curr_y), uid, fill=(255, 255, 255, 210), font=font_uid)
-    
-    # 8. Tombol Bottom Menu
+
+    # ── 8. Tombol Menu Utama Bawah ───────────────────────────────────────
     curr_y += 45
-    btn_m_h = 68
-    draw.rounded_rectangle([(margin_x, curr_y), (width - margin_x, curr_y + btn_m_h)], radius=12, fill=white, outline=border_color, width=1)
-    menu_text = "←  Kembali Ke Menu Utama"
-    bbox_m = draw.textbbox((0, 0), menu_text, font=font_bottom)
-    draw.text(((width - (bbox_m[2] - bbox_m[0])) // 2, curr_y + 18), menu_text, fill=(211, 47, 47), font=font_bottom)
+    menu_h = 70
+    draw.rounded_rectangle([(card_x, curr_y), (card_x + card_w, curr_y + menu_h)], radius=12, fill=white, outline=border_color, width=1)
     
+    menu_text = "Kembali Ke Menu Utama"
+    bbox_m = draw.textbbox((0, 0), menu_text, font=font_menu)
+    total_w = 22 + 12 + (bbox_m[2] - bbox_m[0])
+    start_x = (width - total_w) // 2
+    
+    # Gambar panah manual
+    draw_arrow_left(draw, start_x, curr_y + menu_h // 2, size=18, color=(211, 47, 47))
+    # Teks merah
+    draw.text((start_x + 34, curr_y + (menu_h - (bbox_m[3] - bbox_m[1])) // 2 - 1), menu_text, fill=(211, 47, 47), font=font_menu)
+
     img.save(output_file, "PNG")
     return output_file
 
@@ -179,4 +226,4 @@ if __name__ == "__main__":
         "odp_name": "ODP-UBN-FAR/08",
     }
     generate_scc_image(sample_data, "mock_scc.png")
-    print("PNG generated: mock_scc.png")
+    print("PNG v2 generated successfully!")
