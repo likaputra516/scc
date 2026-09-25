@@ -7,9 +7,9 @@ tanpa perlu browser — menggunakan reverse-engineered API.
 
 Kompatibel dengan: Android (Termux), Windows, Linux, macOS
 
-Instalasi:
-  pip install requests            # minimal
-  pip install requests speedtest-cli  # dengan speedtest otomatis
+Instalasi Termux:
+  pkg install git python python-pillow -y
+  pip install -r requirements.txt
 
 Penggunaan CLI:
   python scc_checker.py                          # mode interaktif (menu)
