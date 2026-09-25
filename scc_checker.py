@@ -720,12 +720,25 @@ def interactive_mode():
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
-            print()
-            res = check_scc(ticket_id=ticket, lat=lat, lon=lon,
-                            run_speedtest=run_st, auto_speed=auto_st,
-                            manual_dl_mbps=dl, manual_ul_mbps=ul,
-                            manual_ping_ms=ping, manual_jitter_ms=jitter)
-            print_result(res)
+            while True:
+                print()
+                res = check_scc(ticket_id=ticket, lat=lat, lon=lon,
+                                run_speedtest=run_st, auto_speed=auto_st,
+                                manual_dl_mbps=dl, manual_ul_mbps=ul,
+                                manual_ping_ms=ping, manual_jitter_ms=jitter)
+                print_result(res)
+
+                # Cek apakah hasil NORMAL atau tidak
+                status_str = res.get("status", "")
+                is_normal = "NORMAL" in status_str and "BELUM" not in status_str and "ERROR" not in status_str
+
+                if not is_normal:
+                    retry = _input("\n  ⚠️  Hasil belum layak/normal. Ulangi pengecekan untuk tiket ini? (y/n)", default="y")
+                    if retry.lower() in ("y", "yes", "ya"):
+                        print(f"\n  🔄 Mengulangi pengecekan untuk {ticket}...")
+                        continue
+
+                break
 
             # Tanya simpan ke JSON?
             save = _input("\n  Simpan hasil ke JSON? (kosongkan untuk skip)")
