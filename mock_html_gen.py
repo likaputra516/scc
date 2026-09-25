@@ -3,7 +3,9 @@ HTML Mock Generator untuk SCC Telkom
 Menghasilkan file HTML responsif yang persis 100% dengan tampilan asli web SCC Telkom.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+WIB_TZ = timezone(timedelta(hours=7))
 
 try:
     from logos_b64 import LOGO1_B64, LOGO2_B64
@@ -26,13 +28,13 @@ def generate_scc_html(data: dict, output_file: str = "mock_scc.html") -> str:
     if lat is not None and lon is not None:
         latlong = f"{lat:.6f},{lon:.6f}"
     else:
-        latlong = "-8.666807,115.181211"
+        latlong = "-"
         
     jarak = data.get("odp_distance_m")
-    jarak_str = f"{jarak} m" if jarak is not None else "33 m"
-    odp_name = data.get("odp_name", "ODP-UBN-FAR/08") or "ODP-UBN-FAR/08"
+    jarak_str = f"{jarak} m" if jarak is not None else "0 m"
+    odp_name = data.get("odp_name") or "-"
     
-    now = datetime.now()
+    now = datetime.now(timezone.utc).astimezone(WIB_TZ)
     ts1 = now.strftime("%Y-%m-%d %H:%M:%S WIB")
     ts2 = now.strftime("%H:%M:%S WIB")
     

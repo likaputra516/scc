@@ -35,8 +35,15 @@ import uuid
 import random
 import re
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote
+
+# Zona Waktu WIB (UTC+7) resmi Telkom
+WIB_TZ = timezone(timedelta(hours=7))
+
+def _get_wib_now():
+    """Mengembalikan datetime saat ini dalam zona waktu WIB (UTC+7)."""
+    return datetime.now(timezone.utc).astimezone(WIB_TZ)
 
 try:
     import requests
@@ -199,7 +206,7 @@ def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
     nd       = data.get("nd", "UNKNOWN")
     odp_raw  = data.get("odp_name") or "NO_ODP"
     odp_clean = re.sub(r'[^A-Za-z0-9_-]', '_', odp_raw)
-    now_dt   = datetime.now()
+    now_dt   = _get_wib_now()
     dt_str   = now_dt.strftime("%Y%m%d_%H%M%S")
 
     save_dir = _get_save_dir()
