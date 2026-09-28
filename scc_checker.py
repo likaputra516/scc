@@ -124,6 +124,28 @@ def _parse_package_speed(package_name: str):
     return None
 
 
+def _safe_json(resp) -> dict:
+    """
+    Parse JSON dengan aman dari respons requests.
+    Mampu membersihkan PHP notices / error HTML yang sering disisipkan server Telkom.
+    """
+    if resp is None:
+        return {}
+    try:
+        return resp.json()
+    except Exception:
+        text = resp.text or ""
+        # Cari kurung kurawal pertama '{' dan kurung kurawal terakhir '}'
+        start = text.find("{")
+        end   = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start:end+1])
+            except Exception:
+                pass
+    return {}
+
+
 # ─── Image Generator Helpers ──────────────────────────────────────────────────
 
 def _get_save_dir() -> str:
@@ -489,7 +511,7 @@ def check_scc(ticket_id: str,
         _log("Mengambil data pelanggan...")
         r = session.post(f"{BASE_URL}/retrieveNDByIN", headers=_HEADERS_AJAX,
                          data={"uid": uid}, timeout=timeout)
-        nd_resp = r.json()
+        nd_resp = _safe_json(r)
         if nd_resp.get("success") and nd_resp.get("data"):
             d = nd_resp["data"]
             result["nd"]         = d.get("nd")
@@ -497,11 +519,16 @@ def check_scc(ticket_id: str,
             result["olt"]        = d.get("hostname_olt")
             result["service_id"] = d.get("service_id")
 
+        if not result["nd"]:
+            result["error"]  = "Nomor internet (ND) tidak ditemukan untuk tiket ini (tiket invalid/sudah closed)."
+            result["status"] = "ERROR"
+            return result
+
         # Step 5: Info paket
         _log("Mengambil info paket...")
         r = session.post(f"{BASE_URL}/retrieveUPCF", headers=_HEADERS_AJAX,
                          data={"uid": uid}, timeout=timeout)
-        upcf = r.json()
+        upcf = _safe_json(r)
         if upcf.get("success"):
             result["package"] = upcf["data"].get("package_name")
             result["_raw"]["upcf"] = upcf["data"]
@@ -510,7 +537,7 @@ def check_scc(ticket_id: str,
         _log("Mengecek IP BNG...")
         r = session.post(f"{BASE_URL}/retrieveIPRadius", headers=_HEADERS_AJAX,
                          data={"uid": uid}, timeout=timeout)
-        ip_check = r.json()
+        ip_check = _safe_json(r)
         if ip_check.get("success"):
             result["is_bng"] = ip_check["data"].get("is_bng")
 
@@ -536,7 +563,7 @@ def check_scc(ticket_id: str,
         # Step 9: ONT speed
         r = session.post(f"{BASE_URL}/retrieveSpeedAcsis", headers=_HEADERS_AJAX,
                          data={"uid": uid}, timeout=timeout)
-        acsis = r.json()
+        acsis = _safe_json(r)
         if acsis.get("success"):
             result["ont_speed"] = acsis["data"].get("speed")
 
@@ -544,7 +571,7 @@ def check_scc(ticket_id: str,
         _log("Mengecek kualitas jaringan...")
         r = session.post(f"{BASE_URL}/retrieveUkur", headers=_HEADERS_AJAX,
                          data={"uid": uid}, timeout=timeout)
-        ukur = r.json()
+        ukur = _safe_json(r)
         if ukur.get("success"):
             redaman = ukur["data"].get("redaman_passed")
             result["kualitas_jaringan"] = "Layak" if redaman == 1 else "Belum Layak"
@@ -574,7 +601,7 @@ def check_scc(ticket_id: str,
             _log("Mengambil verdict akhir...")
             r = session.post(f"{BASE_URL}/retrieveCloseAuto", headers=_HEADERS_AJAX,
                              data={"uid": uid}, timeout=timeout)
-            close = r.json()
+            close = _safe_json(r)
             if close.get("success"):
                 result["final_verdict"] = close["data"]
                 result["_raw"]["close"] = close["data"]
