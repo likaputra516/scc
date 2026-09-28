@@ -31,6 +31,7 @@ import sys
 import os
 import io
 import base64
+import subprocess
 import uuid
 import random
 import re
@@ -190,6 +191,33 @@ def _draw_arrow_left(draw, x, y, size=16, color=(211, 47, 47)):
     draw.line([(x, y), (x + size, y)], fill=color, width=3)
     draw.line([(x, y), (x + int(size * 0.4), y - int(size * 0.4))], fill=color, width=3)
     draw.line([(x, y), (x + int(size * 0.4), y + int(size * 0.4))], fill=color, width=3)
+
+
+def _scan_media_file(file_path: str):
+    """
+    Kirim broadcast ke Android MediaStore agar gambar baru langsung terindeks
+    dan seketika itu juga muncul di aplikasi Galeri, Telegram, WhatsApp, dll.
+    """
+    abs_path = os.path.abspath(file_path)
+
+    # 1. Coba lewat Termux API tool jika terinstall
+    try:
+        res = subprocess.run(["termux-media-scan", abs_path], capture_output=True, timeout=2)
+        if res.returncode == 0:
+            return
+    except Exception:
+        pass
+
+    # 2. Coba lewat Android Activity Manager broadcast (bawaan semua OS Android)
+    try:
+        subprocess.run(
+            ["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+             "-d", f"file://{abs_path}"],
+            capture_output=True,
+            timeout=2
+        )
+    except Exception:
+        pass
 
 
 def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
@@ -363,6 +391,10 @@ def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
 
     try:
         img.save(output_path, "PNG")
+
+        # Segarkan MediaStore Android agar gambar langsung muncul di Galeri & Telegram
+        _scan_media_file(output_path)
+
         return output_path
     except Exception as e:
         _log(f"⚠️  Gagal menyimpan gambar: {e}")
