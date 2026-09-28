@@ -633,13 +633,9 @@ def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
         )
         odp = odp_r.json()
         if odp.get("success") and odp.get("data"):
-            dist = d.get("distance")
-            # Jika jarak terbaca 0 atau 1 meter, beri random noise natural (15 - 45 meter)
-            if dist is not None and dist <= 1:
-                dist = random.randint(15, 45)
-
+            d = odp["data"]
             result["odp_name"]          = d.get("odpName")
-            result["odp_distance_m"]    = dist
+            result["odp_distance_m"]    = d.get("distance")
             result["odp_inside_radius"] = d.get("isInside")
             result["odp_lat"]           = d.get("odpLat")
             result["odp_long"]          = d.get("odpLong")
