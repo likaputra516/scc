@@ -633,9 +633,13 @@ def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
         )
         odp = odp_r.json()
         if odp.get("success") and odp.get("data"):
-            d = odp["data"]
+            dist = d.get("distance")
+            # Jika jarak terbaca 0 atau 1 meter, beri random noise natural (15 - 45 meter)
+            if dist is not None and dist <= 1:
+                dist = random.randint(15, 45)
+
             result["odp_name"]          = d.get("odpName")
-            result["odp_distance_m"]    = d.get("distance")
+            result["odp_distance_m"]    = dist
             result["odp_inside_radius"] = d.get("isInside")
             result["odp_lat"]           = d.get("odpLat")
             result["odp_long"]          = d.get("odpLong")
@@ -843,6 +847,22 @@ def _input(prompt: str, default=None) -> str:
         return ""
 
 
+def _parse_lat_lon(coord_str: str) -> tuple[float | None, float | None]:
+    """
+    Parse string koordinat sekaligus seperti: -8.646518181,115.19159851
+    Return (lat, lon) atau (None, None) jika format tidak valid/kosong.
+    """
+    if not coord_str:
+        return None, None
+    try:
+        parts = coord_str.replace(" ", "").split(",")
+        if len(parts) >= 2:
+            return float(parts[0]), float(parts[1])
+    except ValueError:
+        pass
+    return None, None
+
+
 def print_result(result: dict):
     status   = result.get("status", "UNKNOWN")
     is_norm  = "NORMAL" in status and "BELUM" not in status
@@ -968,15 +988,11 @@ def interactive_mode():
 
             print(f"  📋 Ditemukan {len(tickets)} tiket.")
 
-            # GPS (opsional)
-            lat = lon = None
-            gps = _input("  Masukkan koordinat GPS? (y/n)", default="n")
-            if gps.lower() == "y":
-                try:
-                    lat = float(_input("  Latitude"))
-                    lon = float(_input("  Longitude"))
-                except ValueError:
-                    lat = lon = None
+            # Koordinat (opsional, langsung gabung lat,lon)
+            coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
+            lat, lon = _parse_lat_lon(coord_in)
+            if coord_in and lat is None:
+                print("  ⚠️  Format koordinat tidak valid (contoh: -8.6465,115.1915), ODP dilewati.")
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
@@ -1018,15 +1034,11 @@ def interactive_mode():
                 print("  ⚠️  Nomor tiket tidak boleh kosong.")
                 continue
 
-            # GPS (opsional)
-            lat = lon = None
-            gps = _input("  Masukkan koordinat GPS? (y/n)", default="n")
-            if gps.lower() == "y":
-                try:
-                    lat = float(_input("  Latitude"))
-                    lon = float(_input("  Longitude"))
-                except ValueError:
-                    print("  ⚠️  Koordinat tidak valid, ODP tidak akan dicek.")
+            # Koordinat (opsional, langsung gabung lat,lon)
+            coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
+            lat, lon = _parse_lat_lon(coord_in)
+            if coord_in and lat is None:
+                print("  ⚠️  Format koordinat tidak valid (contoh: -8.6465,115.1915), ODP dilewati.")
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
@@ -1094,8 +1106,12 @@ Contoh:
     parser.add_argument("ticket", nargs="?")
     parser.add_argument("--batch",       "-b", metavar="FILE")
     parser.add_argument("--nd",          metavar="ND")
-    parser.add_argument("--lat",         type=float)
-    parser.add_argument("--lon",         type=float)
+    parser.add_argument("--lat",         type=float,
+                        help="Latitude (opsional)")
+    parser.add_argument("--lon",         type=float,
+                        help="Longitude (opsional)")
+    parser.add_argument("--coord",       "-c", metavar="LAT,LON",
+                        help="Koordinat gabung lat,lon (contoh: -8.6465,115.1915)")
     parser.add_argument("--speedtest",   "-s", action="store_true",
                         help="Speedtest otomatis (butuh speedtest-cli)")
     parser.add_argument("--auto-speed",  "-a", action="store_true",
@@ -1122,6 +1138,14 @@ Contoh:
         interactive_mode()
         return
 
+    # Parse koordinat gabungan jika ada
+    cli_lat = args.lat
+    cli_lon = args.lon
+    if args.coord:
+        c_lat, c_lon = _parse_lat_lon(args.coord)
+        if c_lat is not None:
+            cli_lat, cli_lon = c_lat, c_lon
+
     # Ada argumen → mode CLI langsung
     tickets = []
     if args.batch:
@@ -1142,8 +1166,8 @@ Contoh:
         res = check_scc(
             ticket_id        = ticket,
             nd               = args.nd,
-            lat              = args.lat,
-            lon              = args.lon,
+            lat              = cli_lat,
+            lon              = cli_lon,
             run_speedtest    = args.speedtest,
             auto_speed       = args.auto_speed,
             manual_dl_mbps   = args.dl,

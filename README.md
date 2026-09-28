@@ -31,9 +31,9 @@ python scc_checker.py INC53061310
 python scc_checker.py INC53061310 --image
 ```
 
-### Cek tiket + lokasi GPS + auto speed + generate gambar
+### Cek tiket + koordinat gabung (lat,lon) + auto speed + generate gambar
 ```bash
-python scc_checker.py INC53061310 --lat -8.638186 --lon 115.215263 --auto-speed --image
+python scc_checker.py INC53061310 --coord -8.638186,115.215263 --auto-speed --image
 ```
 
 ### Cek batch banyak tiket dari file (+ generate semua gambar)
