@@ -71,6 +71,9 @@ BASE_URL    = "https://scc.telkom.co.id/CloseTicket.Internet/Check_embededv1"
 MYSIIS_BASE = "https://api.mysiis.io/m/speedtest/v1"
 MYSIIS_KEY  = "MVnSDdytX3LVwtwDsTeVDiBxVAUoq9p9"
 
+# Webhook n8n untuk lookup ODP terdekat (bisa diset via env SCC_ODP_WEBHOOK_URL atau flag --webhook)
+N8N_ODP_WEBHOOK = os.getenv("SCC_ODP_WEBHOOK_URL", "")
+
 _HEADERS_AJAX = {
     "User-Agent"       : "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
                          "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
@@ -886,6 +889,111 @@ def _parse_lat_lon(coord_str: str) -> tuple[float | None, float | None]:
     return None, None
 
 
+def lookup_nearest_odp(odp_name: str, webhook_url: str = None) -> tuple:
+    """
+    Lookup kandidat ODP terdekat via Webhook n8n dan memilih 1 secara acak.
+
+    Parameter:
+        odp_name    : Nama ODP target (misal: "ODP-UBN-FAQ/01")
+        webhook_url : Override URL webhook n8n (opsional)
+
+    Returns:
+        (success: bool, lat: float|None, lon: float|None, chosen_pin: str|None, jarak_m: int|None, candidates: list)
+    """
+    url = (webhook_url or N8N_ODP_WEBHOOK or "").strip()
+    if not url:
+        return False, None, None, None, None, []
+
+    if not odp_name or not odp_name.strip():
+        return False, None, None, None, None, []
+
+    try:
+        resp = requests.get(url, params={"odp": odp_name.strip()}, timeout=15)
+        if resp.status_code != 200:
+            return False, None, None, None, None, []
+        data = _safe_json(resp)
+        if not isinstance(data, dict) or not data.get("success"):
+            return False, None, None, None, None, []
+
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return False, None, None, None, None, []
+
+        # Pilih satu kandidat ODP terdekat secara acak
+        chosen = random.choice(candidates)
+        try:
+            lat = float(chosen["latitude"])
+            lon = float(chosen["longitude"])
+        except (ValueError, TypeError, KeyError):
+            return False, None, None, None, None, []
+
+        pin = chosen.get("pin_name", odp_name)
+        dist = chosen.get("jarak_meter", 0)
+        try:
+            dist = int(dist)
+        except (ValueError, TypeError):
+            dist = 0
+
+        return True, lat, lon, pin, dist, candidates
+    except Exception:
+        return False, None, None, None, None, []
+
+
+def _parse_batch_line(line: str) -> dict:
+    """
+    Parse satu baris file batch tiket.
+    Mendukung format:
+      1. TIKET (misal: INC53061310)
+      2. TIKET,NAMA_ODP (misal: INC53061310,ODP-UBN-FAQ/01)
+      3. TIKET,LAT,LON (misal: INC53061310,-8.6465,115.1915)
+      4. TIKET,NAMA_ODP,LAT,LON (misal: INC53061310,ODP-UBN-FAQ/01,-8.6465,115.1915)
+
+    Return dict: {"ticket": str, "odp": str|None, "lat": float|None, "lon": float|None}
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return {}
+
+    parts = [p.strip() for p in re.split(r'[,;\t]+', line) if p.strip()]
+    if not parts:
+        return {}
+
+    ticket = parts[0]
+    odp = None
+    lat = None
+    lon = None
+
+    if len(parts) == 2:
+        col2 = parts[1]
+        c_lat, c_lon = _parse_lat_lon(col2)
+        if c_lat is not None and c_lon is not None:
+            lat, lon = c_lat, c_lon
+        else:
+            odp = col2
+    elif len(parts) >= 3:
+        is_coord = False
+        try:
+            lat = float(parts[1])
+            lon = float(parts[2])
+            is_coord = True
+        except ValueError:
+            pass
+
+        if is_coord:
+            if len(parts) >= 4:
+                odp = parts[3]
+        else:
+            odp = parts[1]
+            if len(parts) >= 4:
+                try:
+                    lat = float(parts[2])
+                    lon = float(parts[3])
+                except ValueError:
+                    pass
+
+    return {"ticket": ticket, "odp": odp, "lat": lat, "lon": lon}
+
+
 def print_result(result: dict):
     status   = result.get("status", "UNKNOWN")
     is_norm  = "NORMAL" in status and "BELUM" not in status
@@ -1004,18 +1112,35 @@ def interactive_mode():
                 continue
             try:
                 with open(path, encoding="utf-8") as f:
-                    tickets = [ln.strip() for ln in f if ln.strip()]
+                    raw_lines = [ln.strip() for ln in f if ln.strip()]
             except FileNotFoundError:
                 print(f"  ❌ File tidak ditemukan: {path}")
                 continue
 
-            print(f"  📋 Ditemukan {len(tickets)} tiket.")
+            batch_items = [_parse_batch_line(ln) for ln in raw_lines]
+            batch_items = [it for it in batch_items if it.get("ticket")]
+            if not batch_items:
+                print(f"  ⚠️  Tidak ada tiket valid yang ditemukan di: {path}")
+                continue
 
-            # Koordinat (opsional, langsung gabung lat,lon)
-            coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
-            lat, lon = _parse_lat_lon(coord_in)
-            if coord_in and lat is None:
-                print("  ⚠️  Format koordinat tidak valid (contoh: -8.6465,115.1915), ODP dilewati.")
+            print(f"  📋 Ditemukan {len(batch_items)} tiket.")
+
+            # Cek apakah ada baris yang butuh webhook ODP
+            has_odp = any(it.get("odp") for it in batch_items)
+            if has_odp:
+                global N8N_ODP_WEBHOOK
+                if not N8N_ODP_WEBHOOK:
+                    print("  ℹ️  Ada tiket dengan nama ODP tetapi URL Webhook n8n belum diatur.")
+                    wb = _input("  Masukkan URL Webhook n8n [Enter = skip ODP]")
+                    if wb:
+                        N8N_ODP_WEBHOOK = wb.strip()
+
+            # Default koordinat umum (opsional) jika ada baris yang tidak punya ODP/koordinat
+            has_missing_loc = any(it["odp"] is None and it["lat"] is None for it in batch_items)
+            default_lat, default_lon = None, None
+            if has_missing_loc:
+                coord_in = _input("  Default koordinat ODP untuk tiket tanpa ODP (lat,lon) [Enter = skip]")
+                default_lat, default_lon = _parse_lat_lon(coord_in)
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
@@ -1027,9 +1152,27 @@ def interactive_mode():
             output_path = _input("  Simpan data ke file JSON? (kosongkan untuk skip)")
 
             results = []
-            for i, ticket in enumerate(tickets):
-                print(f"\n  [{i+1}/{len(tickets)}] Mengecek {ticket}...")
-                res = check_scc(ticket_id=ticket, lat=lat, lon=lon,
+            for i, item in enumerate(batch_items):
+                t_ticket = item["ticket"]
+                t_lat    = item["lat"]
+                t_lon    = item["lon"]
+                t_odp    = item["odp"]
+
+                print(f"\n  [{i+1}/{len(batch_items)}] Mengecek {t_ticket}...")
+                if t_odp:
+                    print(f"  🔍 Mencari ODP tetangga untuk '{t_odp}'...")
+                    ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(t_odp)
+                    if ok:
+                        print(f"  🎲 Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
+                        t_lat, t_lon = n_lat, n_lon
+                    else:
+                        print(f"  ⚠️  ODP '{t_odp}' tidak ditemukan di database n8n.")
+                        print(f"  ℹ️  Tetap melanjutkan pengecekan SCC tanpa koordinat ODP...")
+                        t_lat, t_lon = None, None
+                elif t_lat is None and default_lat is not None:
+                    t_lat, t_lon = default_lat, default_lon
+
+                res = check_scc(ticket_id=t_ticket, lat=t_lat, lon=t_lon,
                                 run_speedtest=run_st, auto_speed=auto_st,
                                 manual_dl_mbps=dl, manual_ul_mbps=ul,
                                 manual_ping_ms=ping, manual_jitter_ms=jitter)
@@ -1057,11 +1200,57 @@ def interactive_mode():
                 print("  ⚠️  Nomor tiket tidak boleh kosong.")
                 continue
 
-            # Koordinat (opsional, langsung gabung lat,lon)
-            coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
-            lat, lon = _parse_lat_lon(coord_in)
-            if coord_in and lat is None:
-                print("  ⚠️  Format koordinat tidak valid (contoh: -8.6465,115.1915), ODP dilewati.")
+            lat, lon = None, None
+            print("\n  📍 Lokasi / Titik ODP:")
+            print("  [1] Cari via Nama ODP (Nearest ODP dari database n8n)")
+            print("  [2] Input manual koordinat (lat,lon)")
+            print("  [3] Lewati (tanpa cek ODP)")
+            pilih_loc = _input("  Pilih", default="1")
+
+            if pilih_loc == "1":
+                if not N8N_ODP_WEBHOOK:
+                    print("  ℹ️  URL Webhook n8n belum diatur.")
+                    wb = _input("  Masukkan URL Webhook n8n")
+                    if wb:
+                        N8N_ODP_WEBHOOK = wb.strip()
+
+                while True:
+                    odp_in = _input("  Nama ODP target (contoh: ODP-UBN-FAQ/01)")
+                    if not odp_in:
+                        print("  ⚠️  Dilewati tanpa ODP.")
+                        break
+
+                    print(f"  🔍 Mencari ODP tetangga di sekitar '{odp_in}'...")
+                    ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(odp_in)
+                    if ok:
+                        print(f"  ✅ Ditemukan {len(cand)} ODP tetangga:")
+                        for idx, c in enumerate(cand, 1):
+                            print(f"     {idx}. {c.get('pin_name')} (~{c.get('jarak_meter')}m)")
+                        print(f"  🎲 Terpilih acak: {n_pin} (jarak ~{n_dist}m)")
+                        print(f"  📍 Koordinat digunakan: {n_lat}, {n_lon}")
+                        lat, lon = n_lat, n_lon
+                        break
+                    else:
+                        print(f"  ⚠️  ODP '{odp_in}' tidak ditemukan di database n8n.")
+                        print("  Pilihan fallback:")
+                        print("  [1] Input koordinat manual (lat,lon)")
+                        print("  [2] Coba masukkan nama ODP lain")
+                        print("  [3] Tetap lanjut SCC tanpa ODP")
+                        fb = _input("  Pilih fallback", default="3")
+                        if fb == "1":
+                            coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
+                            lat, lon = _parse_lat_lon(coord_in)
+                            break
+                        elif fb == "2":
+                            continue
+                        else:
+                            print("  ℹ️  Melanjutkan SCC tanpa ODP.")
+                            break
+            elif pilih_loc == "2":
+                coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
+                lat, lon = _parse_lat_lon(coord_in)
+                if coord_in and lat is None:
+                    print("  ⚠️  Format koordinat tidak valid (contoh: -8.6465,115.1915), ODP dilewati.")
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
@@ -1129,6 +1318,8 @@ Contoh:
     parser.add_argument("ticket", nargs="?")
     parser.add_argument("--batch",       "-b", metavar="FILE")
     parser.add_argument("--nd",          metavar="ND")
+    parser.add_argument("--odp",         help="Nama ODP target (akan dicari nearest ODP via webhook n8n)")
+    parser.add_argument("--webhook",     "-w", help="URL Webhook n8n untuk nearest ODP lookup")
     parser.add_argument("--lat",         type=float,
                         help="Latitude (opsional)")
     parser.add_argument("--lon",         type=float,
@@ -1161,6 +1352,8 @@ Contoh:
         interactive_mode()
         return
 
+    effective_webhook = (args.webhook or N8N_ODP_WEBHOOK or "").strip()
+
     # Parse koordinat gabungan jika ada
     cli_lat = args.lat
     cli_lon = args.lon
@@ -1169,28 +1362,77 @@ Contoh:
         if c_lat is not None:
             cli_lat, cli_lon = c_lat, c_lon
 
+    # Jika --odp diberikan pada mode single
+    if args.odp and not args.batch:
+        if not effective_webhook:
+            print("⚠️  --odp diberikan tetapi URL webhook n8n belum diatur.", file=sys.stderr)
+            print("   Gunakan --webhook <URL> atau set environment variable SCC_ODP_WEBHOOK_URL.", file=sys.stderr)
+            print("   Melanjutkan pengecekan SCC tanpa ODP...\n", file=sys.stderr)
+        else:
+            print(f"🔍 Mencari ODP tetangga di sekitar '{args.odp}' via n8n...", file=sys.stderr)
+            ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(args.odp, webhook_url=effective_webhook)
+            if ok:
+                print(f"✅ Ditemukan {len(cand)} ODP tetangga:", file=sys.stderr)
+                for idx, c in enumerate(cand, 1):
+                    print(f"   {idx}. {c.get('pin_name')} (~{c.get('jarak_meter')}m)", file=sys.stderr)
+                print(f"🎲 Terpilih acak: {n_pin} (jarak ~{n_dist}m)", file=sys.stderr)
+                print(f"📍 Menggunakan koordinat: {n_lat}, {n_lon}\n", file=sys.stderr)
+                cli_lat, cli_lon = n_lat, n_lon
+            else:
+                print(f"⚠️  ODP '{args.odp}' tidak ditemukan di database n8n.", file=sys.stderr)
+                print(f"ℹ️  Melanjutkan pengecekan SCC tanpa koordinat ODP...\n", file=sys.stderr)
+
     # Ada argumen → mode CLI langsung
-    tickets = []
+    batch_items = []
     if args.batch:
         try:
             with open(args.batch, encoding="utf-8") as f:
-                tickets = [ln.strip() for ln in f if ln.strip()]
+                raw_lines = [ln.strip() for ln in f if ln.strip()]
         except FileNotFoundError:
             print(f"❌ File tidak ditemukan: {args.batch}")
             sys.exit(1)
+        for ln in raw_lines:
+            it = _parse_batch_line(ln)
+            if it.get("ticket"):
+                batch_items.append(it)
+        if not batch_items:
+            print(f"⚠️  Tidak ada tiket valid di: {args.batch}")
+            sys.exit(1)
     else:
-        tickets = [args.ticket]
+        batch_items = [{"ticket": args.ticket, "odp": None, "lat": cli_lat, "lon": cli_lon}]
 
     results = []
-    for i, ticket in enumerate(tickets):
-        if len(tickets) > 1:
-            print(f"\n[{i+1}/{len(tickets)}] Mengecek {ticket}...", file=sys.stderr)
+    for i, item in enumerate(batch_items):
+        t_ticket = item["ticket"]
+        t_lat    = item["lat"]
+        t_lon    = item["lon"]
+        t_odp    = item["odp"]
+
+        if len(batch_items) > 1:
+            print(f"\n[{i+1}/{len(batch_items)}] Mengecek {t_ticket}...", file=sys.stderr)
+
+        if t_odp:
+            if not effective_webhook:
+                print(f"⚠️  [{t_ticket}] ODP '{t_odp}' tertera tapi webhook n8n belum diatur. Melewati ODP...", file=sys.stderr)
+                t_lat, t_lon = None, None
+            else:
+                print(f"🔍 [{t_ticket}] Mencari ODP tetangga untuk '{t_odp}'...", file=sys.stderr)
+                ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(t_odp, webhook_url=effective_webhook)
+                if ok:
+                    print(f"🎲 [{t_ticket}] Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})", file=sys.stderr)
+                    t_lat, t_lon = n_lat, n_lon
+                else:
+                    print(f"⚠️  [{t_ticket}] ODP '{t_odp}' tidak ditemukan di database n8n.", file=sys.stderr)
+                    print(f"ℹ️  Tetap melanjutkan pengecekan SCC tanpa koordinat ODP...", file=sys.stderr)
+                    t_lat, t_lon = None, None
+        elif t_lat is None and cli_lat is not None:
+            t_lat, t_lon = cli_lat, cli_lon
 
         res = check_scc(
-            ticket_id        = ticket,
+            ticket_id        = t_ticket,
             nd               = args.nd,
-            lat              = cli_lat,
-            lon              = cli_lon,
+            lat              = t_lat,
+            lon              = t_lon,
             run_speedtest    = args.speedtest,
             auto_speed       = args.auto_speed,
             manual_dl_mbps   = args.dl,

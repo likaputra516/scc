@@ -1,0 +1,13 @@
+# Ignore local workflow and json data
+Where is My ODP*.json
+*.json
+!package*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/

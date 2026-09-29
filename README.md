@@ -31,15 +31,24 @@ python scc_checker.py INC53061310
 python scc_checker.py INC53061310 --image
 ```
 
+### Cek satu tiket + koordinat ODP otomatis via nama ODP (Nearest ODP n8n)
+```bash
+python scc_checker.py INC53061310 --odp ODP-UBN-FAQ/01 --auto-speed --image
+```
+
 ### Cek tiket + koordinat gabung (lat,lon) + auto speed + generate gambar
 ```bash
 python scc_checker.py INC53061310 --coord -8.638186,115.215263 --auto-speed --image
 ```
 
-### Cek batch banyak tiket dari file (+ generate semua gambar)
+### Cek batch banyak tiket dari file (+ format nama ODP / koordinat per baris)
 ```bash
 python scc_checker.py --batch contoh_tiket.txt --auto-speed --image
 ```
+Format file batch didukung:
+- `INC53061310` *(hanya tiket)*
+- `INC53061310,ODP-UBN-FAQ/01` *(tiket + nama ODP, otomatis cari ODP tetangga & pilih acak)*
+- `INC53061310,-8.6381,115.2152` *(tiket + koordinat manual lat,lon)*
 
 ### Output JSON (untuk integrasi program lain)
 ```bash
