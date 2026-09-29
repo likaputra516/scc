@@ -72,7 +72,7 @@ MYSIIS_BASE = "https://api.mysiis.io/m/speedtest/v1"
 MYSIIS_KEY  = "MVnSDdytX3LVwtwDsTeVDiBxVAUoq9p9"
 
 # Webhook n8n untuk lookup ODP terdekat (bisa diset via env SCC_ODP_WEBHOOK_URL atau flag --webhook)
-N8N_ODP_WEBHOOK = os.getenv("SCC_ODP_WEBHOOK_URL", "")
+N8N_ODP_WEBHOOK = os.getenv("SCC_ODP_WEBHOOK_URL", "https://n8n-server.my.id/webhook/nearest-odp")
 
 _HEADERS_AJAX = {
     "User-Agent"       : "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
