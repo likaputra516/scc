@@ -1201,56 +1201,21 @@ def interactive_mode():
                 continue
 
             lat, lon = None, None
-            print("\n  📍 Lokasi / Titik ODP:")
-            print("  [1] Cari via Nama ODP (Nearest ODP dari database n8n)")
-            print("  [2] Input manual koordinat (lat,lon)")
-            print("  [3] Lewati (tanpa cek ODP)")
-            pilih_loc = _input("  Pilih", default="1")
-
-            if pilih_loc == "1":
-                if not N8N_ODP_WEBHOOK:
-                    print("  ℹ️  URL Webhook n8n belum diatur.")
-                    wb = _input("  Masukkan URL Webhook n8n")
-                    if wb:
-                        N8N_ODP_WEBHOOK = wb.strip()
-
-                while True:
-                    odp_in = _input("  Nama ODP target (contoh: ODP-UBN-FAQ/01)")
-                    if not odp_in:
-                        print("  ⚠️  Dilewati tanpa ODP.")
-                        break
-
+            loc_in = _input("  Titik ODP (Nama ODP / koordinat lat,lon) [Enter = skip]")
+            if loc_in:
+                c_lat, c_lon = _parse_lat_lon(loc_in)
+                if c_lat is not None and c_lon is not None:
+                    lat, lon = c_lat, c_lon
+                else:
+                    odp_in = loc_in.strip()
                     print(f"  🔍 Mencari ODP tetangga di sekitar '{odp_in}'...")
                     ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(odp_in)
                     if ok:
-                        print(f"  ✅ Ditemukan {len(cand)} ODP tetangga:")
-                        for idx, c in enumerate(cand, 1):
-                            print(f"     {idx}. {c.get('pin_name')} (~{c.get('jarak_meter')}m)")
                         print(f"  🎲 Terpilih acak: {n_pin} (jarak ~{n_dist}m)")
-                        print(f"  📍 Koordinat digunakan: {n_lat}, {n_lon}")
+                        print(f"  📍 Koordinat: {n_lat}, {n_lon}")
                         lat, lon = n_lat, n_lon
-                        break
                     else:
-                        print(f"  ⚠️  ODP '{odp_in}' tidak ditemukan di database n8n.")
-                        print("  Pilihan fallback:")
-                        print("  [1] Input koordinat manual (lat,lon)")
-                        print("  [2] Coba masukkan nama ODP lain")
-                        print("  [3] Tetap lanjut SCC tanpa ODP")
-                        fb = _input("  Pilih fallback", default="3")
-                        if fb == "1":
-                            coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
-                            lat, lon = _parse_lat_lon(coord_in)
-                            break
-                        elif fb == "2":
-                            continue
-                        else:
-                            print("  ℹ️  Melanjutkan SCC tanpa ODP.")
-                            break
-            elif pilih_loc == "2":
-                coord_in = _input("  Koordinat ODP (lat,lon) [Enter = skip]")
-                lat, lon = _parse_lat_lon(coord_in)
-                if coord_in and lat is None:
-                    print("  ⚠️  Format koordinat tidak valid (contoh: -8.6465,115.1915), ODP dilewati.")
+                        print(f"  ⚠️  ODP '{odp_in}' tidak ditemukan di database. Lanjut tanpa ODP.")
 
             run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
 
