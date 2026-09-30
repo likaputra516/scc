@@ -1083,185 +1083,167 @@ def _menu_speedtest() -> tuple:
         return False, False, None, None, 10.0, 1.0
 
 
+ASCII_BANNER = r"""
+  ___ ___ ___   ___ _           _             
+ / __/ __/ __| / __| |_  ___ __| |_____ _ _   
+ \__ \__ \ (__| (__| ' \/ -_) _| / / -_) '_|  
+ |___/___/\___|\___|_||_\___\__|_|_\___|_|    
+ ═════════════════════════════════════════════
+    ⚡ Service Completion Check Telkom ⚡
+               by thesilent33
+ ═════════════════════════════════════════════
+"""
+
+
+def _collect_interactive_tickets() -> list:
+    """
+    Kumpulkan tiket dari input user secara cerdas:
+      - 1 tiket       : INC53473372,ODP-UBN-FAS/63
+      - Banyak tiket  : Paste banyak baris langsung dari clipboard
+      - Dari file     : tiket.txt
+      - Pisah spasi   : INC1,ODP1  INC2,ODP2
+
+    Return list of dict, atau None jika user mengetik 'q' / 'exit'.
+    """
+    print("\n  Masukkan Tiket / ODP / File:")
+    print("  • 1 tiket    : INC53473372,ODP-UBN-FAS/63")
+    print("  • Multi-tiket: Langsung paste daftar tiket")
+    print("  • Dari file  : tiket.txt")
+    print("  • Keluar     : q")
+
+    try:
+        raw = input("\n  > ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+    if not raw:
+        return []
+
+    if raw.lower() in ("q", "quit", "exit", "keluar"):
+        return None
+
+    lines = []
+
+    # 1. Cek apakah input adalah path file yang ada di disk
+    if os.path.isfile(raw):
+        try:
+            with open(raw, encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            print(f"  📂 Membaca file: {raw}")
+        except Exception as e:
+            print(f"  ❌ Gagal membaca file {raw}: {e}")
+            return []
+    else:
+        lines.append(raw)
+
+        # 2. Cek apakah ada baris tambahan yang tertempel (pasted) di stdin (Termux / Linux)
+        try:
+            import select
+            while sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
+                extra = sys.stdin.readline()
+                if not extra:
+                    break
+                extra_clean = extra.strip()
+                if extra_clean:
+                    lines.append(extra_clean)
+        except Exception:
+            pass
+
+    # 3. Pecah juga jika ada beberapa tiket dalam 1 baris yang dipisah spasi ganda / titik koma
+    expanded_lines = []
+    for ln in lines:
+        tokens = re.split(r'\s{2,}|\t+|;', ln)
+        for tok in tokens:
+            tok = tok.strip()
+            if tok:
+                expanded_lines.append(tok)
+
+    # 4. Parse setiap baris menjadi dict item tiket
+    items = []
+    for ln in expanded_lines:
+        parsed = _parse_batch_line(ln)
+        if parsed.get("ticket"):
+            items.append(parsed)
+
+    return items
+
+
 def interactive_mode():
-    """Mode menu interaktif dengan looping."""
-    print("\n" + "═"*54)
-    print("  🛠️   SCC TELKOM CHECKER")
-    print("  Alat bantu pengecekan layanan internet IndiHome")
-    print("═"*54)
+    """Mode interaktif terpadu (Unified Single & Batch)."""
+    print(ASCII_BANNER)
 
     while True:
-        print("\n  ┌─ MENU UTAMA ─────────────────────────────┐")
-        print("  │  [1] Cek satu tiket                      │")
-        print("  │  [2] Cek batch dari file                 │")
-        print("  │  [3] Keluar                              │")
-        print("  └──────────────────────────────────────────┘")
-
-        pilihan = _input("\n  Pilih menu", default="1")
-
-        # ── Keluar ────────────────────────────────────────────────────────
-        if pilihan in ("3", "q", "quit", "exit", "keluar"):
+        items = _collect_interactive_tickets()
+        if items is None:
             print("\n  👋 Sampai jumpa!\n")
             break
 
-        # ── Batch ─────────────────────────────────────────────────────────
-        elif pilihan == "2":
-            path = _input("  Path file tiket")
-            if not path:
-                print("  ⚠️  Path tidak boleh kosong.")
-                continue
-            try:
-                with open(path, encoding="utf-8") as f:
-                    raw_lines = [ln.strip() for ln in f if ln.strip()]
-            except FileNotFoundError:
-                print(f"  ❌ File tidak ditemukan: {path}")
-                continue
+        if not items:
+            continue
 
-            batch_items = [_parse_batch_line(ln) for ln in raw_lines]
-            batch_items = [it for it in batch_items if it.get("ticket")]
-            if not batch_items:
-                print(f"  ⚠️  Tidak ada tiket valid yang ditemukan di: {path}")
-                continue
-
-            print(f"  📋 Ditemukan {len(batch_items)} tiket.")
-
-            # Cek apakah ada baris yang butuh webhook ODP
-            has_odp = any(it.get("odp") for it in batch_items)
-            if has_odp:
-                global N8N_ODP_WEBHOOK
-                if not N8N_ODP_WEBHOOK:
-                    print("  ℹ️  Ada tiket dengan nama ODP tetapi URL Webhook n8n belum diatur.")
-                    wb = _input("  Masukkan URL Webhook n8n [Enter = skip ODP]")
-                    if wb:
-                        N8N_ODP_WEBHOOK = wb.strip()
-
-            # Default koordinat umum (opsional) jika ada baris yang tidak punya ODP/koordinat
-            has_missing_loc = any(it["odp"] is None and it["lat"] is None for it in batch_items)
-            default_lat, default_lon = None, None
-            if has_missing_loc:
-                coord_in = _input("  Default koordinat ODP untuk tiket tanpa ODP (lat,lon) [Enter = skip]")
-                default_lat, default_lon = _parse_lat_lon(coord_in)
-
-            run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
-
-            # Opsi generate gambar untuk batch
-            gen_img = _input("  Generate gambar hasil SCC ke Documents/SCC? (y/n)", default="y")
-            do_gen_img = gen_img.lower() in ("y", "yes", "ya")
-
-            # Output JSON
-            output_path = _input("  Simpan data ke file JSON? (kosongkan untuk skip)")
-
-            results = []
-            for i, item in enumerate(batch_items):
-                t_ticket = item["ticket"]
-                t_lat    = item["lat"]
-                t_lon    = item["lon"]
-                t_odp    = item["odp"]
-
-                print(f"\n  [{i+1}/{len(batch_items)}] Mengecek {t_ticket}...")
-                if t_odp:
-                    print(f"  🔍 Mencari ODP tetangga untuk '{t_odp}'...")
-                    ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(t_odp)
-                    if ok:
-                        print(f"  🎲 Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
-                        t_lat, t_lon = n_lat, n_lon
-                    else:
-                        print(f"  ⚠️  ODP '{t_odp}' tidak ditemukan di database n8n.")
-                        print(f"  ℹ️  Tetap melanjutkan pengecekan SCC tanpa koordinat ODP...")
-                        t_lat, t_lon = None, None
-                elif t_lat is None and default_lat is not None:
-                    t_lat, t_lon = default_lat, default_lon
-
-                res = check_scc(ticket_id=t_ticket, lat=t_lat, lon=t_lon,
-                                run_speedtest=run_st, auto_speed=auto_st,
-                                manual_dl_mbps=dl, manual_ul_mbps=ul,
-                                manual_ping_ms=ping, manual_jitter_ms=jitter)
-                print_result(res)
-
-                if do_gen_img:
-                    img_path = generate_scc_image(res)
-                    if img_path:
-                        print(f"  🖼️  Gambar disimpan: {img_path}")
-
-                results.append(res)
-
-            if output_path:
-                try:
-                    with open(output_path, "w", encoding="utf-8") as f:
-                        json.dump(results, f, indent=2, ensure_ascii=False)
-                    print(f"\n  💾 Disimpan ke: {output_path}")
-                except Exception as e:
-                    print(f"  ❌ Gagal simpan: {e}")
-
-        # ── Satu Tiket ────────────────────────────────────────────────────
+        total = len(items)
+        if total == 1:
+            print(f"\n  🎯 Memproses tiket: {items[0]['ticket']}...")
         else:
-            ticket = _input("  Nomor tiket (contoh: INC53061310)")
-            if not ticket:
-                print("  ⚠️  Nomor tiket tidak boleh kosong.")
-                continue
+            print(f"\n  📋 Ditemukan {total} tiket. Memulai pengecekan...")
 
-            lat, lon = None, None
-            loc_in = _input("  Titik ODP (Nama ODP / koordinat lat,lon) [Enter = skip]")
-            if loc_in:
-                c_lat, c_lon = _parse_lat_lon(loc_in)
-                if c_lat is not None and c_lon is not None:
-                    lat, lon = c_lat, c_lon
+        results = []
+        for i, item in enumerate(items):
+            t_ticket = item["ticket"]
+            t_lat    = item["lat"]
+            t_lon    = item["lon"]
+            t_odp    = item["odp"]
+
+            if total > 1:
+                print(f"\n{'─'*54}")
+                print(f"  [{i+1}/{total}] Memproses {t_ticket}...")
+
+            if t_odp:
+                print(f"  🔍 Mencari ODP tetangga untuk '{t_odp}'...")
+                ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(t_odp)
+                if ok:
+                    print(f"  🎲 Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
+                    t_lat, t_lon = n_lat, n_lon
                 else:
-                    odp_in = loc_in.strip()
-                    print(f"  🔍 Mencari ODP tetangga di sekitar '{odp_in}'...")
-                    ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(odp_in)
-                    if ok:
-                        print(f"  🎲 Terpilih acak: {n_pin} (jarak ~{n_dist}m)")
-                        print(f"  📍 Koordinat: {n_lat}, {n_lon}")
-                        lat, lon = n_lat, n_lon
-                    else:
-                        print(f"  ⚠️  ODP '{odp_in}' tidak ditemukan di database. Lanjut tanpa ODP.")
+                    print(f"  ⚠️  ODP '{t_odp}' tidak ditemukan di database n8n. Lanjut tanpa ODP.")
+                    t_lat, t_lon = None, None
 
-            run_st, auto_st, dl, ul, ping, jitter = _menu_speedtest()
+            res = check_scc(
+                ticket_id        = t_ticket,
+                lat              = t_lat,
+                lon              = t_lon,
+                auto_speed       = True,
+                timeout          = 20,
+            )
+            print_result(res)
 
-            # Opsi generate gambar sebelum pengecekan
-            gen_img = _input("  Generate gambar hasil SCC ke Documents/SCC? (y/n)", default="y")
-            do_gen_img = gen_img.lower() in ("y", "yes", "ya")
+            # Auto-generate gambar hasil SCC
+            img_path = generate_scc_image(res)
+            if img_path:
+                print(f"  🖼️  Gambar disimpan: {img_path}")
 
-            while True:
-                print()
-                res = check_scc(ticket_id=ticket, lat=lat, lon=lon,
-                                run_speedtest=run_st, auto_speed=auto_st,
-                                manual_dl_mbps=dl, manual_ul_mbps=ul,
-                                manual_ping_ms=ping, manual_jitter_ms=jitter)
-                print_result(res)
-
-                # Cek apakah hasil NORMAL atau tidak
+            # Jika cuma 1 tiket dan statusnya BELUM NORMAL / ERROR, tawarkan retry
+            if total == 1:
                 status_str = res.get("status", "")
                 is_normal = "NORMAL" in status_str and "BELUM" not in status_str and "ERROR" not in status_str
-
                 if not is_normal:
-                    retry = _input("\n  ⚠️  Hasil belum layak/normal. Ulangi pengecekan untuk tiket ini? (y/n)", default="y")
+                    retry = _input("\n  ⚠️  Hasil belum normal. Ulangi pengecekan untuk tiket ini? (y/n)", default="y")
                     if retry.lower() in ("y", "yes", "ya"):
-                        print(f"\n  🔄 Mengulangi pengecekan untuk {ticket}...")
+                        print(f"\n  🔄 Mengulangi pengecekan untuk {t_ticket}...")
+                        res_retry = check_scc(ticket_id=t_ticket, lat=t_lat, lon=t_lon, auto_speed=True)
+                        print_result(res_retry)
+                        generate_scc_image(res_retry)
+                        results.append(res_retry)
                         continue
 
-                break
+            results.append(res)
 
-            # Generate gambar jika dipilih
-            if do_gen_img:
-                img_path = generate_scc_image(res)
-                if img_path:
-                    print(f"\n  🖼️  Gambar hasil SCC tersimpan di: {img_path}")
+        if total > 1:
+            print(f"\n{'═'*54}")
+            print(f"  ✅ Selesai mengecek seluruh {total} tiket!")
+            print(f"{'═'*54}")
 
-            # Tanya simpan ke JSON?
-            save = _input("\n  Simpan hasil ke JSON? (kosongkan untuk skip)")
-            if save:
-                try:
-                    with open(save, "w", encoding="utf-8") as f:
-                        res_clean = {k: v for k, v in res.items() if k != "_raw"}
-                        json.dump(res_clean, f, indent=2, ensure_ascii=False)
-                    print(f"  💾 Disimpan ke: {save}")
-                except Exception as e:
-                    print(f"  ❌ Gagal simpan: {e}")
-
-        # Jeda sebelum kembali ke menu
-        input("\n  Tekan Enter untuk kembali ke menu...")
+        input("\n  Tekan Enter untuk kembali ke menu utama...")
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
