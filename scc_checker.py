@@ -1084,13 +1084,15 @@ def _menu_speedtest() -> tuple:
 
 
 ASCII_BANNER = r"""
+ ═════════════════════════════════════════════
   ___ ___ ___   ___ _           _             
  / __/ __/ __| / __| |_  ___ __| |_____ _ _   
  \__ \__ \ (__| (__| ' \/ -_) _| / / -_) '_|  
  |___/___/\___|\___|_||_\___\__|_|_\___|_|    
- ═════════════════════════════════════════════
+ 
+ ─────────────────────────────────────────────
     ⚡ Service Completion Check Telkom ⚡
-             by freedom_seeker
+              by freedom_seeker
  ═════════════════════════════════════════════
 """
 
@@ -1106,10 +1108,10 @@ def _collect_interactive_tickets() -> list:
     Return list of dict, atau None jika user mengetik 'q' / 'exit'.
     """
     print("\n  Masukkan Tiket / ODP / File:")
-    print("  • 1 tiket    : INC53473372,ODP-UBN-FAS/63")
-    print("  • Multi-tiket: Langsung paste daftar tiket")
-    print("  • Dari file  : tiket.txt")
-    print("  • Keluar     : q")
+    print("  • 1 tiket     : INC53473372,ODP-UBN-FAS/63")
+    print("  • Multi-tiket : Langsung paste daftar tiket")
+    print("  • Dari file   : tiket.txt")
+    print("  • Keluar      : q")
 
     try:
         raw = input("\n  > ").strip()
@@ -1170,9 +1172,8 @@ def _collect_interactive_tickets() -> list:
 
 def interactive_mode():
     """Mode interaktif terpadu (Unified Single & Batch)."""
-    print(ASCII_BANNER)
-
     while True:
+        print(ASCII_BANNER)
         items = _collect_interactive_tickets()
         if items is None:
             print("\n  👋 Sampai jumpa!\n")
@@ -1220,7 +1221,7 @@ def interactive_mode():
             # Auto-generate gambar hasil SCC
             img_path = generate_scc_image(res)
             if img_path:
-                print(f"  🖼️  Gambar disimpan: {img_path}")
+                print(f"  🖼️  Gambar hasil SCC disimpan: {img_path}\n\n")
 
             # Jika cuma 1 tiket dan statusnya BELUM NORMAL / ERROR, tawarkan retry
             if total == 1:
@@ -1298,6 +1299,10 @@ Contoh:
     if not args.ticket and not args.batch:
         interactive_mode()
         return
+
+    # Tampilkan banner jika bukan mode JSON murni
+    if not args.json:
+        print(ASCII_BANNER)
 
     effective_webhook = (args.webhook or N8N_ODP_WEBHOOK or "").strip()
 
