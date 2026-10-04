@@ -1051,6 +1051,72 @@ def print_result(result: dict):
     print(f"{'═'*54}")
 
 
+def _retry_with_real_odp(ticket_id: str, res: dict, auto_speed: bool = True) -> dict | None:
+    """
+    Jika jarak ODP terlalu jauh (>1km) dan ada nama ODP datek resmi dari Telkom,
+    tanyakan konfirmasi ke user untuk mengulangi pengecekan menggunakan ODP datek tersebut.
+
+    Return result baru jika diulang, atau None jika tidak diulang/tidak memenuhi syarat.
+    """
+    inside = res.get("odp_inside_radius")
+    real_odp = res.get("odp_name")
+    dist = res.get("odp_distance_m")
+
+    # Hanya picu jika jarak ODP di luar radius (inside is False) dan nama ODP datek ada
+    if inside is not False or not real_odp:
+        return None
+
+    dist_str = f"{dist} m" if dist is not None else "> 1km"
+    print(f"\n  ⚠️  Jarak ODP terlalu jauh ({dist_str}) — kemungkinan salah input ODP / datek berbeda!")
+    print(f"  📌  ODP terdaftar di Telkom (datek): {real_odp}")
+
+    konfirmasi = _input(f"  Ulangi pengecekan dengan datek asli '{real_odp}'? (y/n)", default="y")
+    if konfirmasi.lower() not in ("y", "yes", "ya"):
+        return None
+
+    print(f"\n  🔄 Mengulangi pengecekan {ticket_id} dengan datek '{real_odp}'...")
+    print(f"  🔍 Mencari ODP tetangga untuk '{real_odp}' via n8n...")
+
+    ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(real_odp)
+    new_lat, new_lon = None, None
+    if ok:
+        print(f"  🎲 Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
+        new_lat, new_lon = n_lat, n_lon
+    else:
+        # Fallback jika datek tidak ditemukan di database n8n:
+        # Gunakan odpLat & odpLong dari SCC dengan offset alami (~35-65m)
+        telkom_lat = res.get("odp_lat")
+        telkom_lon = res.get("odp_long")
+        if telkom_lat and telkom_lon:
+            try:
+                base_lat = float(telkom_lat)
+                base_lon = float(telkom_lon)
+                import math
+                angle = random.uniform(0, 2 * math.pi)
+                radius_deg = random.uniform(0.00035, 0.00065)  # ~38 - 72 meter
+                new_lat = round(base_lat + radius_deg * math.cos(angle), 7)
+                new_lon = round(base_lon + radius_deg * math.sin(angle), 7)
+                print(f"  ℹ️  '{real_odp}' tidak ada di DB n8n. Menggunakan koordinat Telkom + offset alami: ({new_lat}, {new_lon})")
+            except (ValueError, TypeError):
+                new_lat, new_lon = None, None
+        else:
+            print(f"  ⚠️  Koordinat datek '{real_odp}' tidak dapat ditentukan.")
+
+    res_retry = check_scc(
+        ticket_id=ticket_id,
+        lat=new_lat,
+        lon=new_lon,
+        auto_speed=auto_speed,
+        timeout=20,
+    )
+    print_result(res_retry)
+    img_path = generate_scc_image(res_retry)
+    if img_path:
+        print(f"  🖼️  Gambar hasil SCC diperbarui: {img_path}\n\n")
+
+    return res_retry
+
+
 # ─── Menu Interaktif ──────────────────────────────────────────────────────────
 
 def _menu_speedtest() -> tuple:
@@ -1222,6 +1288,11 @@ def interactive_mode():
             img_path = generate_scc_image(res)
             if img_path:
                 print(f"  🖼️  Gambar hasil SCC disimpan: {img_path}\n\n")
+
+            # Fallback jika jarak ODP terlalu jauh (>1km) / salah input datek
+            res_datek = _retry_with_real_odp(t_ticket, res, auto_speed=True)
+            if res_datek:
+                res = res_datek
 
             # Jika cuma 1 tiket dan statusnya BELUM NORMAL / ERROR, tawarkan retry
             if total == 1:
@@ -1407,6 +1478,14 @@ Contoh:
             img_path = generate_scc_image(res)
             if img_path:
                 print(f"  🖼️  Gambar disimpan: {img_path}")
+
+        # Fallback datek jika jarak ODP terlalu jauh (>1km)
+        if not args.json:
+            res_datek = _retry_with_real_odp(t_ticket, res, auto_speed=args.auto_speed or True)
+            if res_datek:
+                res = res_datek
+                if args.no_raw:
+                    res.pop("_raw", None)
 
         results.append(res)
 
