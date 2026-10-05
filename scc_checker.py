@@ -1175,7 +1175,7 @@ def _collect_interactive_tickets() -> list:
     """
     print("\n  Masukkan Tiket / ODP / File:")
     print("  • 1 tiket     : INC53473372,ODP-UBN-FAS/63")
-    print("  • Multi-tiket : Langsung paste daftar tiket")
+    print("  • Multi-tiket : Langsung paste daftar tiket (atau ketik 'm')")
     print("  • Dari file   : tiket.txt")
     print("  • Keluar      : q")
 
@@ -1192,8 +1192,21 @@ def _collect_interactive_tickets() -> list:
 
     lines = []
 
-    # 1. Cek apakah input adalah path file yang ada di disk
-    if os.path.isfile(raw):
+    # 1. Mode input multi-line eksplisit jika user mengetik 'm' / 'multi' / 'b' / 'batch'
+    if raw.lower() in ("m", "multi", "b", "batch"):
+        print("\n  📋 Mode Multi-Tiket (paste daftar tiket di bawah):")
+        print("     Tekan Enter pada baris kosong untuk selesai.")
+        while True:
+            try:
+                line_in = input("  > ").strip()
+            except (KeyboardInterrupt, EOFError):
+                break
+            if not line_in:
+                break
+            lines.append(line_in)
+
+    # 2. Cek apakah input adalah path file yang ada di disk
+    elif os.path.isfile(raw):
         try:
             with open(raw, encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f if ln.strip()]
@@ -1201,23 +1214,55 @@ def _collect_interactive_tickets() -> list:
         except Exception as e:
             print(f"  ❌ Gagal membaca file {raw}: {e}")
             return []
+
+    # 3. Input langsung (single line atau paste multi-line dari clipboard)
     else:
         lines.append(raw)
 
-        # 2. Cek apakah ada baris tambahan yang tertempel (pasted) di stdin (Termux / Linux)
+        # Cek dan baca seluruh baris tambahan yang tertempel (pasted) di stdin
+        # Menggunakan os.read langsung pada fd 0 agar tidak tersangkut di internal buffer Python
+        extra_chunks = []
         try:
             import select
-            while sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
-                extra = sys.stdin.readline()
-                if not extra:
+            fd = sys.stdin.fileno()
+            while True:
+                r, _, _ = select.select([fd], [], [], 0.25)
+                if not r:
                     break
-                extra_clean = extra.strip()
-                if extra_clean:
-                    lines.append(extra_clean)
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                extra_chunks.append(chunk.decode("utf-8", errors="replace"))
         except Exception:
             pass
 
-    # 3. Pecah juga jika ada beberapa tiket dalam 1 baris yang dipisah spasi ganda / titik koma
+        # Fallback Windows console buffer jika dijalankan di Windows CMD/PowerShell
+        if not extra_chunks and sys.platform == "win32":
+            try:
+                import msvcrt
+                import time
+                win_chars = []
+                while True:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getwch()
+                        win_chars.append(ch)
+                    else:
+                        time.sleep(0.05)
+                        if not msvcrt.kbhit():
+                            break
+                if win_chars:
+                    extra_chunks.append("".join(win_chars))
+            except Exception:
+                pass
+
+        if extra_chunks:
+            extra_text = "".join(extra_chunks)
+            for ln in extra_text.splitlines():
+                ln_clean = ln.strip()
+                if ln_clean:
+                    lines.append(ln_clean)
+
+    # 4. Pecah juga jika ada beberapa tiket dalam 1 baris yang dipisah spasi ganda / titik koma
     expanded_lines = []
     for ln in lines:
         tokens = re.split(r'\s{2,}|\t+|;', ln)
@@ -1226,7 +1271,7 @@ def _collect_interactive_tickets() -> list:
             if tok:
                 expanded_lines.append(tok)
 
-    # 4. Parse setiap baris menjadi dict item tiket
+    # 5. Parse setiap baris menjadi dict item tiket
     items = []
     for ln in expanded_lines:
         parsed = _parse_batch_line(ln)
@@ -1314,6 +1359,13 @@ def interactive_mode():
             print(f"\n{'═'*54}")
             print(f"  ✅ Selesai mengecek seluruh {total} tiket!")
             print(f"{'═'*54}")
+
+        # Bersihkan sisa karakter/newline di buffer terminal agar prompt enter tidak langsung terlewat
+        try:
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass
 
         input("\n  Tekan Enter untuk kembali ke menu utama...")
 
