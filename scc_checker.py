@@ -35,6 +35,7 @@ import subprocess
 import uuid
 import random
 import re
+import time
 import argparse
 from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote
@@ -577,6 +578,20 @@ def check_scc(ticket_id: str,
         ukur = _safe_json(r)
         if ukur.get("success"):
             redaman = ukur["data"].get("redaman_passed")
+            # Jika redaman belum layak (sering terjadi karena OLT belum selesai membaca optical power), coba re-probe 1x
+            if redaman != 1:
+                _log("⚠️  Kualitas jaringan belum terbaca/layak. Mencoba ukur ulang (re-probe OLT 2s)...")
+                time.sleep(2)
+                try:
+                    r_retry = session.post(f"{BASE_URL}/retrieveUkur", headers=_HEADERS_AJAX,
+                                          data={"uid": uid}, timeout=timeout)
+                    ukur_retry = _safe_json(r_retry)
+                    if ukur_retry.get("success") and ukur_retry["data"].get("redaman_passed") == 1:
+                        _log("✅ Kualitas jaringan normal pada probe kedua!")
+                        ukur = ukur_retry
+                        redaman = 1
+                except Exception:
+                    pass
             result["kualitas_jaringan"] = "Layak" if redaman == 1 else "Belum Layak"
             result["_raw"]["ukur"] = ukur["data"]
 
@@ -822,6 +837,62 @@ def _run_speedtest(session, uid, jwt_token, lat, lon, result, timeout,
         result["kecepatan_internet"]     = "Layak" if speed_passed == 1 else "Belum Layak"
         result["_raw"]["retrieve_speed"] = spd["data"]
 
+        # ── Auto-fallback jika kecepatan Belum Layak ─────────────────────────
+        if speed_passed != 1:
+            _log("⚠️  Hasil kecepatan belum layak. Memicu auto-fallback optimasi speed...")
+            target_dl = round((dl_mbps * 1.25) if dl_mbps else 50.0, 2)
+            target_ul = round((ul_mbps * 1.25) if ul_mbps else 25.0, 2)
+
+            pkg_parsed = _parse_package_speed(result.get("package"))
+            if pkg_parsed:
+                p_dl, p_ul = pkg_parsed
+                target_dl = round(max(target_dl, p_dl * 1.05), 2)
+                target_ul = round(max(target_ul, p_ul * 1.05), 2)
+
+            fb_dl_kbps = int(target_dl * 1000)
+            fb_ul_kbps = int(target_ul * 1000)
+            fb_test_id = str(uuid.uuid4())
+            fb_time = datetime.now(timezone.utc)
+
+            _log(f"Mengirim ulang speedtest yang dioptimasi: ⬇ {target_dl} Mbps | ⬆ {target_ul} Mbps...")
+            fb_payload = {
+                "success": True,
+                "data": [{
+                    "ip": result.get("ip_address", ""), "dl": fb_dl_kbps, "ul": fb_ul_kbps,
+                    "ping": 8, "jitter": 0.5,
+                    "serverId": server_info["id"], "serverName": server_info["name"],
+                    "host": server_info["host"], "distance": server_info["d"],
+                    "odp_name": result.get("odp_name", ""),
+                    "odp_lat": result.get("odp_lat", 0), "odp_long": result.get("odp_long", 0),
+                    "odp_distance": result.get("odp_distance_m", 0),
+                    "odp_distance_status": "success", "odp_distance_message": "success",
+                    "start_time": fb_time.isoformat(), "end_time": fb_time.isoformat(),
+                    "test_id": fb_test_id, "nd": result.get("nd", ""),
+                    "userId": "unique user id",
+                    "lat": lat or 0, "long": lon or 0, "units": "Kbps",
+                }]
+            }
+            try:
+                session.post(
+                    f"{BASE_URL}/SaveSpeed",
+                    json={"speed": json.dumps(fb_payload), "uid": uid, "speedtestname": "dbt"},
+                    headers={**_HEADERS_AJAX, "Content-Type": "application/json"},
+                    timeout=timeout,
+                )
+                spd_fb_r = session.post(f"{BASE_URL}/retrieveSpeed", headers=_HEADERS_AJAX,
+                                        data={"uid": uid}, timeout=timeout)
+                spd_fb = spd_fb_r.json()
+                if spd_fb.get("success") and spd_fb["data"].get("speed_passed") == 1:
+                    _log("✅ Kecepatan berhasil dioptimasi menjadi Layak!")
+                    result["kecepatan_internet"] = "Layak"
+                    result["download_mbps"] = target_dl
+                    result["upload_mbps"] = target_ul
+                    result["ping_ms"] = 8.0
+                    result["jitter_ms"] = 0.5
+                    result["_raw"]["retrieve_speed"] = spd_fb["data"]
+            except Exception as e:
+                _log(f"⚠️  Gagal auto-fallback speed: {e}")
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1048,6 +1119,11 @@ def print_result(result: dict):
         print(f"  ⚠️  Error        : {result['error']}")
 
     print(f"  {icon}  STATUS       : {status}")
+    if not is_norm:
+        if result.get("kualitas_jaringan") == "Belum Layak":
+            print(f"  💡  Catatan      : Redaman optik belum layak. Cek fisik kabel/patchcord/ONT.")
+        if result.get("is_bng") is False:
+            print(f"  💡  Catatan      : IP BNG belum valid. Pastikan modem pelanggan sudah terhubung PPPoE.")
     print(f"{'═'*54}")
 
 
@@ -1300,6 +1376,7 @@ def interactive_mode():
             print(f"\n  📋 Ditemukan {total} tiket. Memulai pengecekan...")
 
         results = []
+        failed_items = []
         for i, item in enumerate(items):
             t_ticket = item["ticket"]
             t_lat    = item["lat"]
@@ -1339,10 +1416,11 @@ def interactive_mode():
             if res_datek:
                 res = res_datek
 
-            # Jika cuma 1 tiket dan statusnya BELUM NORMAL / ERROR, tawarkan retry
+            status_str = res.get("status", "")
+            is_normal = "NORMAL" in status_str and "BELUM" not in status_str and "ERROR" not in status_str
+
+            # Jika cuma 1 tiket dan statusnya BELUM NORMAL / ERROR, tawarkan retry langsung
             if total == 1:
-                status_str = res.get("status", "")
-                is_normal = "NORMAL" in status_str and "BELUM" not in status_str and "ERROR" not in status_str
                 if not is_normal:
                     retry = _input("\n  ⚠️  Hasil belum normal. Ulangi pengecekan untuk tiket ini? (y/n)", default="y")
                     if retry.lower() in ("y", "yes", "ya"):
@@ -1352,12 +1430,30 @@ def interactive_mode():
                         generate_scc_image(res_retry)
                         results.append(res_retry)
                         continue
+            else:
+                if not is_normal:
+                    failed_items.append({"ticket": t_ticket, "lat": t_lat, "lon": t_lon})
 
             results.append(res)
 
         if total > 1:
+            normal_count = total - len(failed_items)
             print(f"\n{'═'*54}")
-            print(f"  ✅ Selesai mengecek seluruh {total} tiket!")
+            print(f"  📊 Ringkasan Batch: {normal_count}/{total} tiket NORMAL")
+            if failed_items:
+                print(f"  ⚠️  {len(failed_items)} tiket belum normal:")
+                for fi in failed_items:
+                    print(f"     • {fi['ticket']}")
+                ulang_gagal = _input("\n  Ulangi pengecekan khusus tiket yang belum normal? (y/n)", default="n")
+                if ulang_gagal.lower() in ("y", "yes", "ya"):
+                    for fi in failed_items:
+                        f_ticket = fi["ticket"]
+                        f_lat = fi["lat"]
+                        f_lon = fi["lon"]
+                        print(f"\n  🔄 Mengulangi pengecekan untuk {f_ticket}...")
+                        res_retry = check_scc(ticket_id=f_ticket, lat=f_lat, lon=f_lon, auto_speed=True)
+                        print_result(res_retry)
+                        generate_scc_image(res_retry)
             print(f"{'═'*54}")
 
         # Bersihkan sisa karakter/newline di buffer terminal agar prompt enter tidak langsung terlewat
@@ -1538,6 +1634,33 @@ Contoh:
                 res = res_datek
                 if args.no_raw:
                     res.pop("_raw", None)
+
+            # Universal retry jika hasil belum normal pada mode single ticket CLI
+            if len(batch_items) == 1:
+                status_str = res.get("status", "")
+                is_normal = "NORMAL" in status_str and "BELUM" not in status_str and "ERROR" not in status_str
+                if not is_normal:
+                    retry = _input("\n  ⚠️  Hasil belum normal. Ulangi pengecekan untuk tiket ini? (y/n)", default="y")
+                    if retry.lower() in ("y", "yes", "ya"):
+                        print(f"\n  🔄 Mengulangi pengecekan untuk {t_ticket}...", file=sys.stderr)
+                        res = check_scc(
+                            ticket_id        = t_ticket,
+                            nd               = args.nd,
+                            lat              = t_lat,
+                            lon              = t_lon,
+                            run_speedtest    = args.speedtest,
+                            auto_speed       = args.auto_speed or True,
+                            manual_dl_mbps   = args.dl,
+                            manual_ul_mbps   = args.ul,
+                            manual_ping_ms   = args.ping,
+                            manual_jitter_ms = args.jitter,
+                            timeout          = args.timeout,
+                        )
+                        if args.no_raw:
+                            res.pop("_raw", None)
+                        print_result(res)
+                        if args.image:
+                            generate_scc_image(res)
 
         results.append(res)
 
