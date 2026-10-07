@@ -36,6 +36,7 @@ import uuid
 import random
 import re
 import time
+import math
 import argparse
 from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote
@@ -74,6 +75,10 @@ MYSIIS_KEY  = "MVnSDdytX3LVwtwDsTeVDiBxVAUoq9p9"
 
 # Webhook n8n untuk lookup ODP terdekat (bisa diset via env SCC_ODP_WEBHOOK_URL atau flag --webhook)
 N8N_ODP_WEBHOOK = os.getenv("SCC_ODP_WEBHOOK_URL", "https://n8n-server.my.id/webhook/nearest-odp")
+
+# Koordinat probe default untuk auto-discovery datek ODP jika input tanpa koordinat
+DEFAULT_PROBE_LAT = float(os.getenv("SCC_PROBE_LAT", "-8.587007"))
+DEFAULT_PROBE_LON = float(os.getenv("SCC_PROBE_LON", "115.208594"))
 
 _HEADERS_AJAX = {
     "User-Agent"       : "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
@@ -439,7 +444,10 @@ def check_scc(ticket_id: str,
               manual_ul_mbps: float = None,
               manual_ping_ms: float = 10.0,
               manual_jitter_ms: float = 1.0,
-              timeout: int = 20) -> dict:
+              timeout: int = 20,
+              webhook_url: str = None,
+              probe_lat: float = None,
+              probe_lon: float = None) -> dict:
     """
     Cek SCC Telkom untuk satu tiket.
 
@@ -595,9 +603,18 @@ def check_scc(ticket_id: str,
             result["kualitas_jaringan"] = "Layak" if redaman == 1 else "Belum Layak"
             result["_raw"]["ukur"] = ukur["data"]
 
-        # ODP Distance (butuh lat/lon)
+        # ODP Distance: jika lat/lon belum ada, jalankan auto-discovery ODP pintar
         jwt_token = None
-        if lat is not None and lon is not None:
+        effective_webhook = (webhook_url or N8N_ODP_WEBHOOK or "").strip()
+        p_lat = probe_lat if probe_lat is not None else DEFAULT_PROBE_LAT
+        p_lon = probe_lon if probe_lon is not None else DEFAULT_PROBE_LON
+
+        if lat is None or lon is None:
+            jwt_token, lat, lon = _auto_discover_odp(
+                session=session, uid=uid, result=result, timeout=timeout,
+                webhook_url=effective_webhook, probe_lat=p_lat, probe_lon=p_lon
+            )
+        else:
             jwt_token = _check_odp(session, uid, lat, lon, result, timeout)
 
         # Speedtest: otomatis, auto-PCRF, atau manual
@@ -641,8 +658,8 @@ def check_scc(ticket_id: str,
 
 # ─── ODP Distance ─────────────────────────────────────────────────────────────
 
-def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
-    """Cek jarak ODP via mysiis.io. Return JWT token jika berhasil."""
+def _get_odp_jwt_token(session, uid: str, result: dict, timeout: int = 20) -> str | None:
+    """Ambil JWT token dari RequestSpeedDBT dan auth/external."""
     try:
         _log("Mengambil token speedtest (untuk ODP)...")
         r = session.post(f"{BASE_URL}/RequestSpeedDBT", headers=_HEADERS_AJAX,
@@ -654,7 +671,6 @@ def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
         param = unquote(dbt["data"].get("param", ""))
         result["service_id"] = result["service_id"] or dbt["data"].get("service_id")
 
-        # Tukar param → JWT
         auth_r = requests.post(
             f"{MYSIIS_BASE}/auth/external",
             data={"grant_type": "client_credentials"},
@@ -665,10 +681,15 @@ def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
         auth_data = auth_r.json()
         if not auth_data.get("success"):
             return None
-        jwt_token = auth_data["data"]["accessToken"]
+        return auth_data["data"]["accessToken"]
+    except Exception as e:
+        result["_raw"]["odp_error"] = str(e)
+        return None
 
-        # Cek jarak ODP
-        _log("Mengecek jarak ODP...")
+
+def _query_odp_distance(jwt_token: str, lat: float, lon: float, result: dict, timeout: int = 20) -> bool:
+    """Kirim koordinat lat/lon ke mysiis.io untuk menghitung jarak ODP."""
+    try:
         odp_r = requests.post(
             f"{MYSIIS_BASE}/tools/check-odp-inside-nd",
             json={"lat": lat, "long": lon},
@@ -685,12 +706,94 @@ def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
             result["odp_lat"]           = d.get("odpLat")
             result["odp_long"]          = d.get("odpLong")
             result["_raw"]["odp"]       = d
-
-        return jwt_token
-
+            return True
+        return False
     except Exception as e:
         result["_raw"]["odp_error"] = str(e)
+        return False
+
+
+def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
+    """Cek jarak ODP via mysiis.io dengan koordinat yang diberikan. Return JWT token jika berhasil."""
+    jwt_token = _get_odp_jwt_token(session, uid, result, timeout)
+    if not jwt_token:
         return None
+    _log("Mengecek jarak ODP...")
+    _query_odp_distance(jwt_token, lat, lon, result, timeout)
+    return jwt_token
+
+
+def _auto_discover_odp(session, uid, result: dict, timeout: int,
+                       webhook_url: str = None,
+                       probe_lat: float = DEFAULT_PROBE_LAT,
+                       probe_lon: float = DEFAULT_PROBE_LON) -> tuple[str | None, float | None, float | None]:
+    """
+    Auto-Discovery ODP Pintar (In-Flight):
+    1. Memancing server Telkom menggunakan koordinat probe untuk membongkar nama ODP datek resmi & titik aslinya.
+    2. Langsung mencari ODP tetangga via Webhook n8n (atau offset alami ~35-65m dari titik Telkom jika n8n tidak ada).
+    3. Mengirimkan ulang koordinat yang valid ke API jarak ODP sehingga radius menjadi valid (<= 1km).
+    Return (jwt_token, resolved_lat, resolved_lon).
+    """
+    jwt_token = _get_odp_jwt_token(session, uid, result, timeout)
+    if not jwt_token:
+        _log("⚠️  Auto-probe ODP gagal: tidak dapat mengambil token ODP.")
+        return None, None, None
+
+    # Step 1: Pancing data ODP datek menggunakan koordinat probe
+    _log(f"🎣 Memancing datek ODP via koordinat probe ({probe_lat}, {probe_lon})...")
+    ok_probe = _query_odp_distance(jwt_token, probe_lat, probe_lon, result, timeout)
+    if not ok_probe or not result.get("odp_name"):
+        _log("⚠️  Auto-probe ODP: Server Telkom tidak mengembalikan data datek ODP untuk tiket ini.")
+        return jwt_token, None, None
+
+    real_odp = result["odp_name"]
+    _log(f"🎯 Datek terdeteksi dari Telkom: '{real_odp}'")
+
+    resolved_lat, resolved_lon = None, None
+
+    # Step 2: Cari ODP tetangga via webhook n8n
+    effective_webhook = (webhook_url or N8N_ODP_WEBHOOK or "").strip()
+    if effective_webhook:
+        _log(f"🔍 Mencari ODP tetangga untuk '{real_odp}' via n8n...")
+        ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(real_odp, webhook_url=effective_webhook)
+        if ok and n_lat is not None and n_lon is not None:
+            _log(f"🎲 Terpilih acak via n8n: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
+            resolved_lat, resolved_lon = n_lat, n_lon
+        else:
+            _log(f"⚠️  ODP '{real_odp}' tidak ditemukan di database n8n. Memakai koordinat Telkom + offset alami...")
+    else:
+        _log("ℹ️  Webhook n8n belum diatur. Memakai koordinat Telkom + offset alami...")
+
+    # Fallback jika n8n tidak menemukan ODP: gunakan koordinat Telkom + offset alami (~38 - 72m)
+    if resolved_lat is None or resolved_lon is None:
+        telkom_lat = result.get("odp_lat")
+        telkom_lon = result.get("odp_long")
+        if telkom_lat and telkom_lon:
+            try:
+                base_lat = float(telkom_lat)
+                base_lon = float(telkom_lon)
+                angle = random.uniform(0, 2 * math.pi)
+                radius_deg = random.uniform(0.00035, 0.00065)  # ~38 - 72 meter
+                resolved_lat = round(base_lat + radius_deg * math.cos(angle), 7)
+                resolved_lon = round(base_lon + radius_deg * math.sin(angle), 7)
+                _log(f"📍 Koordinat di-generate: ({resolved_lat}, {resolved_lon})")
+            except (ValueError, TypeError) as e:
+                _log(f"⚠️  Gagal memproses koordinat Telkom: {e}")
+
+    # Step 3: Re-query jarak ODP menggunakan koordinat baru yang valid
+    if resolved_lat is not None and resolved_lon is not None:
+        _log("Mengecek ulang jarak ODP dengan koordinat baru...")
+        ok_re = _query_odp_distance(jwt_token, resolved_lat, resolved_lon, result, timeout)
+        if ok_re:
+            dist = result.get("odp_distance_m")
+            dist_str = f"{dist} m" if dist is not None else "-"
+            _log(f"✅ Jarak ODP berhasil di-resolve: {dist_str} (≤1km)")
+        else:
+            _log("⚠️  Gagal memperbarui jarak ODP.")
+    else:
+        _log("⚠️  Tidak dapat menentukan koordinat valid untuk ODP ini.")
+
+    return jwt_token, resolved_lat, resolved_lon
 
 
 # ─── Speedtest ────────────────────────────────────────────────────────────────
@@ -1394,8 +1497,11 @@ def interactive_mode():
                     print(f"  🎲 Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
                     t_lat, t_lon = n_lat, n_lon
                 else:
-                    print(f"  ⚠️  ODP '{t_odp}' tidak ditemukan di database n8n. Lanjut tanpa ODP.")
+                    print(f"  ⚠️  ODP '{t_odp}' tidak ditemukan di database n8n. Menggunakan auto-discovery datek...")
                     t_lat, t_lon = None, None
+            else:
+                if t_lat is None and t_lon is None:
+                    print(f"  🎣 Tiket tanpa ODP. Menjalankan auto-discovery datek Telkom...")
 
             res = check_scc(
                 ticket_id        = t_ticket,
@@ -1493,6 +1599,8 @@ Contoh:
                         help="Longitude (opsional)")
     parser.add_argument("--coord",       "-c", metavar="LAT,LON",
                         help="Koordinat gabung lat,lon (contoh: -8.6465,115.1915)")
+    parser.add_argument("--probe-coord", metavar="LAT,LON",
+                        help=f"Koordinat pancingan untuk auto-discovery datek ODP (default: {DEFAULT_PROBE_LAT},{DEFAULT_PROBE_LON})")
     parser.add_argument("--speedtest",   "-s", action="store_true",
                         help="Speedtest otomatis (butuh speedtest-cli)")
     parser.add_argument("--auto-speed",  "-a", action="store_true",
@@ -1532,6 +1640,14 @@ Contoh:
         c_lat, c_lon = _parse_lat_lon(args.coord)
         if c_lat is not None:
             cli_lat, cli_lon = c_lat, c_lon
+
+    # Parse koordinat probe jika ada
+    cli_probe_lat = None
+    cli_probe_lon = None
+    if getattr(args, "probe_coord", None):
+        p_lat, p_lon = _parse_lat_lon(args.probe_coord)
+        if p_lat is not None:
+            cli_probe_lat, cli_probe_lon = p_lat, p_lon
 
     # Jika --odp diberikan pada mode single
     if args.odp and not args.batch:
@@ -1611,6 +1727,9 @@ Contoh:
             manual_ping_ms   = args.ping,
             manual_jitter_ms = args.jitter,
             timeout          = args.timeout,
+            webhook_url      = effective_webhook,
+            probe_lat        = cli_probe_lat,
+            probe_lon        = cli_probe_lon,
         )
 
         if args.no_raw:
@@ -1655,6 +1774,9 @@ Contoh:
                             manual_ping_ms   = args.ping,
                             manual_jitter_ms = args.jitter,
                             timeout          = args.timeout,
+                            webhook_url      = effective_webhook,
+                            probe_lat        = cli_probe_lat,
+                            probe_lon        = cli_probe_lon,
                         )
                         if args.no_raw:
                             res.pop("_raw", None)
