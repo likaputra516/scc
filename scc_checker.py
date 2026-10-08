@@ -79,6 +79,7 @@ N8N_ODP_WEBHOOK = os.getenv("SCC_ODP_WEBHOOK_URL", "https://n8n-server.my.id/web
 # Koordinat probe default untuk auto-discovery datek ODP jika input tanpa koordinat
 DEFAULT_PROBE_LAT = float(os.getenv("SCC_PROBE_LAT", "-8.587007"))
 DEFAULT_PROBE_LON = float(os.getenv("SCC_PROBE_LON", "115.208594"))
+DEFAULT_TIMEOUT   = int(os.getenv("SCC_TIMEOUT", "60"))
 
 _HEADERS_AJAX = {
     "User-Agent"       : "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
@@ -260,6 +261,10 @@ def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
         _log("⚠️  Pillow belum terinstall. Install dengan: pkg install python-pillow")
         return None
 
+    # Jangan generate gambar jika pengecekan error atau tidak ada nomor internet
+    if data.get("status") == "ERROR" or not data.get("nd"):
+        return None
+
     # Siapkan informasi untuk nama file: nomortiket_user_odp_datetime
     ticket   = data.get("ticket", "UNKNOWN")
     nd       = data.get("nd", "UNKNOWN")
@@ -432,6 +437,40 @@ def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
         return None
 
 
+# ─── HTTP Helpers dengan Retry ────────────────────────────────────────────────
+
+def _post_with_retry(session_or_module, url: str, retries: int = 2, timeout: int = DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
+    """Kirim POST request dengan retry otomatis jika terjadi timeout / koneksi terputus."""
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            return session_or_module.post(url, timeout=timeout, **kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            if attempt < retries:
+                endpoint = url.split('/')[-1].split('?')[0] or url
+                _log(f"⚠️  Timeout/koneksi terputus ({endpoint}), mencoba ulang ({attempt}/{retries})...")
+                time.sleep(1.5)
+            else:
+                raise last_exc
+
+
+def _get_with_retry(session_or_module, url: str, retries: int = 2, timeout: int = DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
+    """Kirim GET request dengan retry otomatis jika terjadi timeout / koneksi terputus."""
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            return session_or_module.get(url, timeout=timeout, **kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            if attempt < retries:
+                endpoint = url.split('/')[-1].split('?')[0] or url
+                _log(f"⚠️  Timeout/koneksi terputus ({endpoint}), mencoba ulang ({attempt}/{retries})...")
+                time.sleep(1.5)
+            else:
+                raise last_exc
+
+
 # ─── Fungsi Utama ─────────────────────────────────────────────────────────────
 
 def check_scc(ticket_id: str,
@@ -444,7 +483,7 @@ def check_scc(ticket_id: str,
               manual_ul_mbps: float = None,
               manual_ping_ms: float = 10.0,
               manual_jitter_ms: float = 1.0,
-              timeout: int = 20,
+              timeout: int = DEFAULT_TIMEOUT,
               webhook_url: str = None,
               probe_lat: float = None,
               probe_lon: float = None) -> dict:
@@ -462,7 +501,7 @@ def check_scc(ticket_id: str,
         manual_ul_mbps   : Input manual upload speed (Mbps)
         manual_ping_ms   : Input manual ping (ms, default: 10)
         manual_jitter_ms : Input manual jitter (ms, default: 1)
-        timeout          : Timeout request (detik)
+        timeout          : Timeout request (detik, default: DEFAULT_TIMEOUT)
     """
 
     result = {
@@ -497,16 +536,16 @@ def check_scc(ticket_id: str,
     try:
         # Step 1: Buat session cookie
         _log("Menginisialisasi sesi...")
-        session.get(f"{BASE_URL}/?ticketId={ticket_id}&nd={nd or ''}",
-                    headers={"User-Agent": _HEADERS_AJAX["User-Agent"]},
-                    timeout=timeout)
+        _get_with_retry(session, f"{BASE_URL}/?ticketId={ticket_id}&nd={nd or ''}",
+                        headers={"User-Agent": _HEADERS_AJAX["User-Agent"]},
+                        timeout=timeout, retries=2)
 
         # Step 2: createTask → dapat UID
         _log("Membuat task...")
-        r = session.post(f"{BASE_URL}/createTask", headers=_HEADERS_AJAX,
-                         data={"ticket": ticket_id, "nd": nd or "",
-                               "detailAccess": _DETAIL_ACCESS, "device": "false"},
-                         timeout=timeout)
+        r = _post_with_retry(session, f"{BASE_URL}/createTask", headers=_HEADERS_AJAX,
+                             data={"ticket": ticket_id, "nd": nd or "",
+                                   "detailAccess": _DETAIL_ACCESS, "device": "false"},
+                             timeout=timeout, retries=2)
         data = r.json()
         if not data.get("success"):
             result["error"]  = f"createTask gagal: {data}"
@@ -516,13 +555,13 @@ def check_scc(ticket_id: str,
         result["_raw"]["uid"] = uid
 
         # Step 3: Validasi token
-        session.post(f"{BASE_URL}/retrieveToken1", headers=_HEADERS_AJAX,
-                     data={"uid": uid}, timeout=timeout)
+        _post_with_retry(session, f"{BASE_URL}/retrieveToken1", headers=_HEADERS_AJAX,
+                         data={"uid": uid}, timeout=timeout, retries=2)
 
         # Step 4: Data pelanggan
         _log("Mengambil data pelanggan...")
-        r = session.post(f"{BASE_URL}/retrieveNDByIN", headers=_HEADERS_AJAX,
-                         data={"uid": uid}, timeout=timeout)
+        r = _post_with_retry(session, f"{BASE_URL}/retrieveNDByIN", headers=_HEADERS_AJAX,
+                             data={"uid": uid}, timeout=timeout, retries=2)
         nd_resp = _safe_json(r)
         if nd_resp.get("success") and nd_resp.get("data"):
             d = nd_resp["data"]
@@ -538,8 +577,8 @@ def check_scc(ticket_id: str,
 
         # Step 5: Info paket
         _log("Mengambil info paket...")
-        r = session.post(f"{BASE_URL}/retrieveUPCF", headers=_HEADERS_AJAX,
-                         data={"uid": uid}, timeout=timeout)
+        r = _post_with_retry(session, f"{BASE_URL}/retrieveUPCF", headers=_HEADERS_AJAX,
+                             data={"uid": uid}, timeout=timeout, retries=2)
         upcf = _safe_json(r)
         if upcf.get("success"):
             result["package"] = upcf["data"].get("package_name")
@@ -547,8 +586,8 @@ def check_scc(ticket_id: str,
 
         # Step 6: BNG check
         _log("Mengecek IP BNG...")
-        r = session.post(f"{BASE_URL}/retrieveIPRadius", headers=_HEADERS_AJAX,
-                         data={"uid": uid}, timeout=timeout)
+        r = _post_with_retry(session, f"{BASE_URL}/retrieveIPRadius", headers=_HEADERS_AJAX,
+                             data={"uid": uid}, timeout=timeout, retries=2)
         ip_check = _safe_json(r)
         if ip_check.get("success"):
             result["is_bng"] = ip_check["data"].get("is_bng")
@@ -565,24 +604,24 @@ def check_scc(ticket_id: str,
                 continue
 
         # Step 8: Simpan IP
-        session.post(f"{BASE_URL}/saveWho", headers=_HEADERS_AJAX,
-                     data={"uid": uid, "ip_addr": result["ip_address"] or "",
-                           "success": 1, "request": "",
-                           "response": json.dumps({"ip_addr": result["ip_address"]}),
-                           "statusCode": 200},
-                     timeout=timeout)
+        _post_with_retry(session, f"{BASE_URL}/saveWho", headers=_HEADERS_AJAX,
+                         data={"uid": uid, "ip_addr": result["ip_address"] or "",
+                               "success": 1, "request": "",
+                               "response": json.dumps({"ip_addr": result["ip_address"]}),
+                               "statusCode": 200},
+                         timeout=timeout, retries=2)
 
         # Step 9: ONT speed
-        r = session.post(f"{BASE_URL}/retrieveSpeedAcsis", headers=_HEADERS_AJAX,
-                         data={"uid": uid}, timeout=timeout)
+        r = _post_with_retry(session, f"{BASE_URL}/retrieveSpeedAcsis", headers=_HEADERS_AJAX,
+                             data={"uid": uid}, timeout=timeout, retries=2)
         acsis = _safe_json(r)
         if acsis.get("success"):
             result["ont_speed"] = acsis["data"].get("speed")
 
         # Step 10: KUALITAS JARINGAN (redaman)
         _log("Mengecek kualitas jaringan...")
-        r = session.post(f"{BASE_URL}/retrieveUkur", headers=_HEADERS_AJAX,
-                         data={"uid": uid}, timeout=timeout)
+        r = _post_with_retry(session, f"{BASE_URL}/retrieveUkur", headers=_HEADERS_AJAX,
+                             data={"uid": uid}, timeout=timeout, retries=2)
         ukur = _safe_json(r)
         if ukur.get("success"):
             redaman = ukur["data"].get("redaman_passed")
@@ -591,8 +630,8 @@ def check_scc(ticket_id: str,
                 _log("⚠️  Kualitas jaringan belum terbaca/layak. Mencoba ukur ulang (re-probe OLT 2s)...")
                 time.sleep(2)
                 try:
-                    r_retry = session.post(f"{BASE_URL}/retrieveUkur", headers=_HEADERS_AJAX,
-                                          data={"uid": uid}, timeout=timeout)
+                    r_retry = _post_with_retry(session, f"{BASE_URL}/retrieveUkur", headers=_HEADERS_AJAX,
+                                               data={"uid": uid}, timeout=timeout, retries=2)
                     ukur_retry = _safe_json(r_retry)
                     if ukur_retry.get("success") and ukur_retry["data"].get("redaman_passed") == 1:
                         _log("✅ Kualitas jaringan normal pada probe kedua!")
@@ -634,8 +673,8 @@ def check_scc(ticket_id: str,
         # Verdict final
         if result.get("kecepatan_internet") is not None:
             _log("Mengambil verdict akhir...")
-            r = session.post(f"{BASE_URL}/retrieveCloseAuto", headers=_HEADERS_AJAX,
-                             data={"uid": uid}, timeout=timeout)
+            r = _post_with_retry(session, f"{BASE_URL}/retrieveCloseAuto", headers=_HEADERS_AJAX,
+                                 data={"uid": uid}, timeout=timeout, retries=2)
             close = _safe_json(r)
             if close.get("success"):
                 result["final_verdict"] = close["data"]
@@ -658,12 +697,12 @@ def check_scc(ticket_id: str,
 
 # ─── ODP Distance ─────────────────────────────────────────────────────────────
 
-def _get_odp_jwt_token(session, uid: str, result: dict, timeout: int = 20) -> str | None:
+def _get_odp_jwt_token(session, uid: str, result: dict, timeout: int = DEFAULT_TIMEOUT) -> str | None:
     """Ambil JWT token dari RequestSpeedDBT dan auth/external."""
     try:
         _log("Mengambil token speedtest (untuk ODP)...")
-        r = session.post(f"{BASE_URL}/RequestSpeedDBT", headers=_HEADERS_AJAX,
-                         data={"uid": uid}, timeout=timeout)
+        r = _post_with_retry(session, f"{BASE_URL}/RequestSpeedDBT", headers=_HEADERS_AJAX,
+                             data={"uid": uid}, timeout=timeout, retries=2)
         dbt = r.json()
         if not dbt.get("success"):
             return None
@@ -671,12 +710,14 @@ def _get_odp_jwt_token(session, uid: str, result: dict, timeout: int = 20) -> st
         param = unquote(dbt["data"].get("param", ""))
         result["service_id"] = result["service_id"] or dbt["data"].get("service_id")
 
-        auth_r = requests.post(
+        auth_r = _post_with_retry(
+            requests,
             f"{MYSIIS_BASE}/auth/external",
             data={"grant_type": "client_credentials"},
             headers={"Authorization": f"Bearer {param}", "apikey": MYSIIS_KEY,
                      "Content-Type": "application/x-www-form-urlencoded"},
             timeout=timeout,
+            retries=2,
         )
         auth_data = auth_r.json()
         if not auth_data.get("success"):
@@ -687,15 +728,17 @@ def _get_odp_jwt_token(session, uid: str, result: dict, timeout: int = 20) -> st
         return None
 
 
-def _query_odp_distance(jwt_token: str, lat: float, lon: float, result: dict, timeout: int = 20) -> bool:
+def _query_odp_distance(jwt_token: str, lat: float, lon: float, result: dict, timeout: int = DEFAULT_TIMEOUT) -> bool:
     """Kirim koordinat lat/lon ke mysiis.io untuk menghitung jarak ODP."""
     try:
-        odp_r = requests.post(
+        odp_r = _post_with_retry(
+            requests,
             f"{MYSIIS_BASE}/tools/check-odp-inside-nd",
             json={"lat": lat, "long": lon},
             headers={"Authorization": f"Bearer {jwt_token}", "apikey": MYSIIS_KEY,
                      "Content-Type": "application/json"},
             timeout=timeout,
+            retries=2,
         )
         odp = odp_r.json()
         if odp.get("success") and odp.get("data"):
@@ -713,7 +756,7 @@ def _query_odp_distance(jwt_token: str, lat: float, lon: float, result: dict, ti
         return False
 
 
-def _check_odp(session, uid, lat, lon, result, timeout) -> str | None:
+def _check_odp(session, uid, lat, lon, result, timeout=DEFAULT_TIMEOUT) -> str | None:
     """Cek jarak ODP via mysiis.io dengan koordinat yang diberikan. Return JWT token jika berhasil."""
     jwt_token = _get_odp_jwt_token(session, uid, result, timeout)
     if not jwt_token:
@@ -922,18 +965,20 @@ def _run_speedtest(session, uid, jwt_token, lat, lon, result, timeout,
             "lat": lat or 0, "long": lon or 0, "units": "Kbps",
         }]
     }
-    save_r = session.post(
+    save_r = _post_with_retry(
+        session,
         f"{BASE_URL}/SaveSpeed",
         json={"speed": json.dumps(speed_payload), "uid": uid, "speedtestname": "dbt"},
         headers={**_HEADERS_AJAX, "Content-Type": "application/json"},
         timeout=timeout,
+        retries=2,
     )
     result["_raw"]["save_speed"] = save_r.json()
 
     # retrieveSpeed → evaluasi pass/fail
     _log("Mengevaluasi hasil speedtest...")
-    spd_r = session.post(f"{BASE_URL}/retrieveSpeed", headers=_HEADERS_AJAX,
-                         data={"uid": uid}, timeout=timeout)
+    spd_r = _post_with_retry(session, f"{BASE_URL}/retrieveSpeed", headers=_HEADERS_AJAX,
+                             data={"uid": uid}, timeout=timeout, retries=2)
     spd = spd_r.json()
     if spd.get("success"):
         speed_passed = spd["data"].get("speed_passed")
@@ -976,14 +1021,16 @@ def _run_speedtest(session, uid, jwt_token, lat, lon, result, timeout,
                 }]
             }
             try:
-                session.post(
+                _post_with_retry(
+                    session,
                     f"{BASE_URL}/SaveSpeed",
                     json={"speed": json.dumps(fb_payload), "uid": uid, "speedtestname": "dbt"},
                     headers={**_HEADERS_AJAX, "Content-Type": "application/json"},
                     timeout=timeout,
+                    retries=2,
                 )
-                spd_fb_r = session.post(f"{BASE_URL}/retrieveSpeed", headers=_HEADERS_AJAX,
-                                        data={"uid": uid}, timeout=timeout)
+                spd_fb_r = _post_with_retry(session, f"{BASE_URL}/retrieveSpeed", headers=_HEADERS_AJAX,
+                                            data={"uid": uid}, timeout=timeout, retries=2)
                 spd_fb = spd_fb_r.json()
                 if spd_fb.get("success") and spd_fb["data"].get("speed_passed") == 1:
                     _log("✅ Kecepatan berhasil dioptimasi menjadi Layak!")
@@ -1286,12 +1333,13 @@ def _retry_with_real_odp(ticket_id: str, res: dict, auto_speed: bool = True) -> 
         lat=new_lat,
         lon=new_lon,
         auto_speed=auto_speed,
-        timeout=20,
+        timeout=DEFAULT_TIMEOUT,
     )
     print_result(res_retry)
-    img_path = generate_scc_image(res_retry)
-    if img_path:
-        print(f"  🖼️  Gambar hasil SCC diperbarui: {img_path}\n\n")
+    if res_retry.get("status") != "ERROR" and res_retry.get("nd"):
+        img_path = generate_scc_image(res_retry)
+        if img_path:
+            print(f"  🖼️  Gambar hasil SCC diperbarui: {img_path}\n\n")
 
     return res_retry
 
@@ -1508,14 +1556,15 @@ def interactive_mode():
                 lat              = t_lat,
                 lon              = t_lon,
                 auto_speed       = True,
-                timeout          = 20,
+                timeout          = DEFAULT_TIMEOUT,
             )
             print_result(res)
 
-            # Auto-generate gambar hasil SCC
-            img_path = generate_scc_image(res)
-            if img_path:
-                print(f"  🖼️  Gambar hasil SCC disimpan: {img_path}\n\n")
+            # Auto-generate gambar hasil SCC jika berhasil
+            if res.get("status") != "ERROR" and res.get("nd"):
+                img_path = generate_scc_image(res)
+                if img_path:
+                    print(f"  🖼️  Gambar hasil SCC disimpan: {img_path}\n\n")
 
             # Fallback jika jarak ODP terlalu jauh (>1km) / salah input datek
             res_datek = _retry_with_real_odp(t_ticket, res, auto_speed=True)
@@ -1531,9 +1580,10 @@ def interactive_mode():
                     retry = _input("\n  ⚠️  Hasil belum normal. Ulangi pengecekan untuk tiket ini? (y/n)", default="y")
                     if retry.lower() in ("y", "yes", "ya"):
                         print(f"\n  🔄 Mengulangi pengecekan untuk {t_ticket}...")
-                        res_retry = check_scc(ticket_id=t_ticket, lat=t_lat, lon=t_lon, auto_speed=True)
+                        res_retry = check_scc(ticket_id=t_ticket, lat=t_lat, lon=t_lon, auto_speed=True, timeout=DEFAULT_TIMEOUT)
                         print_result(res_retry)
-                        generate_scc_image(res_retry)
+                        if res_retry.get("status") != "ERROR" and res_retry.get("nd"):
+                            generate_scc_image(res_retry)
                         results.append(res_retry)
                         continue
             else:
@@ -1557,9 +1607,10 @@ def interactive_mode():
                         f_lat = fi["lat"]
                         f_lon = fi["lon"]
                         print(f"\n  🔄 Mengulangi pengecekan untuk {f_ticket}...")
-                        res_retry = check_scc(ticket_id=f_ticket, lat=f_lat, lon=f_lon, auto_speed=True)
+                        res_retry = check_scc(ticket_id=f_ticket, lat=f_lat, lon=f_lon, auto_speed=True, timeout=DEFAULT_TIMEOUT)
                         print_result(res_retry)
-                        generate_scc_image(res_retry)
+                        if res_retry.get("status") != "ERROR" and res_retry.get("nd"):
+                            generate_scc_image(res_retry)
             print(f"{'═'*54}")
 
         # Bersihkan sisa karakter/newline di buffer terminal agar prompt enter tidak langsung terlewat
@@ -1618,7 +1669,7 @@ Contoh:
     parser.add_argument("--output",      "-o", metavar="FILE")
     parser.add_argument("--json",        "-j", action="store_true")
     parser.add_argument("--no-raw",      action="store_true")
-    parser.add_argument("--timeout",     type=int, default=20)
+    parser.add_argument("--timeout",     type=int, default=DEFAULT_TIMEOUT)
 
     args = parser.parse_args()
 
@@ -1741,7 +1792,7 @@ Contoh:
             print_result(res)
 
         # Generate image jika diminta lewat argumen CLI --image / -i
-        if args.image:
+        if args.image and res.get("status") != "ERROR" and res.get("nd"):
             img_path = generate_scc_image(res)
             if img_path:
                 print(f"  🖼️  Gambar disimpan: {img_path}")
@@ -1781,7 +1832,7 @@ Contoh:
                         if args.no_raw:
                             res.pop("_raw", None)
                         print_result(res)
-                        if args.image:
+                        if args.image and res.get("status") != "ERROR" and res.get("nd"):
                             generate_scc_image(res)
 
         results.append(res)
