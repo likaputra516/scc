@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SCC Telkom Checker v4
+SCC v4
 =====================
 Script untuk mengecek hasil SCC (Service Completion Check) Telkom IndiHome
 tanpa perlu browser — menggunakan reverse-engineered API.
@@ -12,15 +12,15 @@ Instalasi Termux:
   pip install -r requirements.txt
 
 Penggunaan CLI:
-  python scc_checker.py                          # mode interaktif (menu)
-  python scc_checker.py INC53061310              # cek langsung
-  python scc_checker.py INC53061310 --lat -8.638 --lon 115.215 --speedtest
-  python scc_checker.py INC53061310 --dl 150 --ul 50   # manual speed (Mbps)
-  python scc_checker.py INC53061310 --auto-speed        # auto dari paket PCRF
-  python scc_checker.py --batch tiket.txt --output hasil.json
+  python scc.py                          # mode interaktif (menu)
+  python scc.py INC53061310              # cek langsung
+  python scc.py INC53061310 --lat -8.638 --lon 115.215 --speedtest
+  python scc.py INC53061310 --dl 150 --ul 50   # manual speed (Mbps)
+  python scc.py INC53061310 --auto-speed        # auto dari paket PCRF
+  python scc.py --batch tiket.txt --output hasil.json
 
 Sebagai modul:
-  from scc_checker import check_scc
+  from scc import check_scc
   result = check_scc("INC53061310", lat=-8.638, lon=115.215, run_speedtest=True)
   result = check_scc("INC53061310", manual_dl_mbps=150.0, manual_ul_mbps=50.0)
   result = check_scc("INC53061310", auto_speed=True)
@@ -73,13 +73,10 @@ BASE_URL    = "https://scc.telkom.co.id/CloseTicket.Internet/Check_embededv1"
 MYSIIS_BASE = "https://api.mysiis.io/m/speedtest/v1"
 MYSIIS_KEY  = "MVnSDdytX3LVwtwDsTeVDiBxVAUoq9p9"
 
-# Webhook n8n untuk lookup ODP terdekat (bisa diset via env SCC_ODP_WEBHOOK_URL atau flag --webhook)
-N8N_ODP_WEBHOOK = os.getenv("SCC_ODP_WEBHOOK_URL", "https://n8n-server.my.id/webhook/nearest-odp")
-
 # Koordinat probe default untuk auto-discovery datek ODP jika input tanpa koordinat
 DEFAULT_PROBE_LAT = float(os.getenv("SCC_PROBE_LAT", "-8.587007"))
 DEFAULT_PROBE_LON = float(os.getenv("SCC_PROBE_LON", "115.208594"))
-DEFAULT_TIMEOUT   = int(os.getenv("SCC_TIMEOUT", "60"))
+DEFAULT_TIMEOUT   = int(os.getenv("SCC_TIMEOUT", "15"))
 
 _HEADERS_AJAX = {
     "User-Agent"       : "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
@@ -156,287 +153,6 @@ def _safe_json(resp) -> dict:
     return {}
 
 
-# ─── Image Generator Helpers ──────────────────────────────────────────────────
-
-def _get_save_dir() -> str:
-    """
-    Cari lokasi penyimpanan gambar (diutamakan internal/Documents/SCC di Android).
-    """
-    candidates = [
-        "/sdcard/Documents/SCC",
-        "/storage/emulated/0/Documents/SCC",
-        "/sdcard/Download/SCC",
-        os.path.expanduser("~/Documents/SCC"),
-        "SCC_Images",
-    ]
-    for d in candidates:
-        try:
-            os.makedirs(d, exist_ok=True)
-            # Test write permission
-            test_file = os.path.join(d, ".test_write")
-            with open(test_file, "w") as f:
-                f.write("1")
-            os.remove(test_file)
-            return d
-        except Exception:
-            continue
-    # Fallback ke folder lokal
-    local_dir = "SCC_Images"
-    os.makedirs(local_dir, exist_ok=True)
-    return local_dir
-
-
-def _get_font(size: int, bold: bool = False):
-    """Cari font sistem Android/Windows yang tersedia untuk Pillow."""
-    candidates = []
-    if bold:
-        candidates = [
-            "/system/fonts/Roboto-Medium.ttf",
-            "/system/fonts/Roboto-Bold.ttf",
-            "/system/fonts/DroidSans-Bold.ttf",
-            "C:\\Windows\\Fonts\\arialbd.ttf",
-            "C:\\Windows\\Fonts\\segoeui.ttf",
-            "arialbd.ttf",
-        ]
-    else:
-        candidates = [
-            "/system/fonts/Roboto-Regular.ttf",
-            "/system/fonts/DroidSans.ttf",
-            "C:\\Windows\\Fonts\\arial.ttf",
-            "C:\\Windows\\Fonts\\segoeui.ttf",
-            "arial.ttf",
-        ]
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                pass
-    try:
-        return ImageFont.truetype("DejaVuSans.ttf", size)
-    except Exception:
-        return ImageFont.load_default()
-
-
-def _draw_arrow_left(draw, x, y, size=16, color=(211, 47, 47)):
-    """Gambar icon panah kiri manual."""
-    draw.line([(x, y), (x + size, y)], fill=color, width=3)
-    draw.line([(x, y), (x + int(size * 0.4), y - int(size * 0.4))], fill=color, width=3)
-    draw.line([(x, y), (x + int(size * 0.4), y + int(size * 0.4))], fill=color, width=3)
-
-
-def _scan_media_file(file_path: str):
-    """
-    Kirim broadcast ke Android MediaStore agar gambar baru langsung terindeks
-    dan seketika itu juga muncul di aplikasi Galeri, Telegram, WhatsApp, dll.
-    """
-    abs_path = os.path.abspath(file_path)
-
-    # 1. Coba lewat Termux API tool jika terinstall
-    try:
-        res = subprocess.run(["termux-media-scan", abs_path], capture_output=True, timeout=2)
-        if res.returncode == 0:
-            return
-    except Exception:
-        pass
-
-    # 2. Coba lewat Android Activity Manager broadcast (bawaan semua OS Android)
-    try:
-        subprocess.run(
-            ["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
-             "-d", f"file://{abs_path}"],
-            capture_output=True,
-            timeout=2
-        )
-    except Exception:
-        pass
-
-
-def generate_scc_image(data: dict, custom_filename: str = None) -> str | None:
-    """
-    Generate gambar PNG hasil SCC Telkom pixel-accurate dan simpan ke Documents/SCC.
-    Nama file format: nomortiket_user_odp_datetime.png
-    """
-    if not HAS_PILLOW:
-        _log("⚠️  Pillow belum terinstall. Install dengan: pkg install python-pillow")
-        return None
-
-    # Jangan generate gambar jika pengecekan error atau tidak ada nomor internet
-    if data.get("status") == "ERROR" or not data.get("nd"):
-        return None
-
-    # Siapkan informasi untuk nama file: nomortiket_user_odp_datetime
-    ticket   = data.get("ticket", "UNKNOWN")
-    nd       = data.get("nd", "UNKNOWN")
-    odp_raw  = data.get("odp_name") or "NO_ODP"
-    odp_clean = re.sub(r'[^A-Za-z0-9_-]', '_', odp_raw)
-    now_dt   = _get_wib_now()
-    dt_str   = now_dt.strftime("%Y%m%d_%H%M%S")
-
-    save_dir = _get_save_dir()
-    if custom_filename:
-        filename = custom_filename
-    else:
-        filename = f"{ticket}_{nd}_{odp_clean}_{dt_str}.png"
-
-    output_path = os.path.join(save_dir, filename)
-
-    width  = 720
-    height = 1560
-
-    bg_red       = (219, 68, 85)        # #db4455
-    white        = (255, 255, 255)
-    gray_label   = (233, 236, 239)      # #e9ecef
-    text_dark    = (33, 37, 41)          # #212529
-    text_gray    = (73, 80, 87)          # #495057
-    border_color = (206, 212, 218)      # #ced4da
-
-    img  = Image.new("RGB", (width, height), bg_red)
-    draw = ImageDraw.Draw(img)
-
-    # 1. Header Putih + Logo
-    header_h = 100
-    draw.rectangle([(0, 0), (width, header_h)], fill=white)
-
-    try:
-        logo1 = None
-        logo2 = None
-        if os.path.exists("logo1.png") and os.path.exists("logo2.png"):
-            logo1 = Image.open("logo1.png").convert("RGBA")
-            logo2 = Image.open("logo2.png").convert("RGBA")
-        elif LOGO1_B64 and LOGO2_B64:
-            logo1 = Image.open(io.BytesIO(base64.b64decode(LOGO1_B64))).convert("RGBA")
-            logo2 = Image.open(io.BytesIO(base64.b64decode(LOGO2_B64))).convert("RGBA")
-
-        if logo1 and logo2:
-            target_h = 44
-            r1 = target_h / logo1.height
-            logo1 = logo1.resize((int(logo1.width * r1), target_h), Image.Resampling.LANCZOS)
-            r2 = target_h / logo2.height
-            logo2 = logo2.resize((int(logo2.width * r2), target_h), Image.Resampling.LANCZOS)
-            img.paste(logo1, (36, (header_h - target_h) // 2), logo1)
-            img.paste(logo2, (width - logo2.width - 36, (header_h - target_h) // 2), logo2)
-    except Exception:
-        pass
-
-    # 2. Fonts
-    font_title   = _get_font(34, bold=True)
-    font_ts_top  = _get_font(23, bold=False)
-    font_label   = _get_font(22, bold=True)
-    font_val     = _get_font(23, bold=False)
-    font_ts_bot  = _get_font(21, bold=False)
-    font_verdict = _get_font(24, bold=False)
-    font_btn_ok  = _get_font(24, bold=True)
-    font_uid     = _get_font(19, bold=False)
-    font_menu    = _get_font(26, bold=True)
-
-    # 3. Judul Utama
-    title_text = "Hasil Pengecekan Internet Anda"
-    bbox_t = draw.textbbox((0, 0), title_text, font=font_title)
-    tw = bbox_t[2] - bbox_t[0]
-    draw.text(((width - tw) // 2, 130), title_text, fill=white, font=font_title)
-    draw.line([(55, 180), (width - 55, 180)], fill=(255, 255, 255, 180), width=2)
-
-    # Timestamp atas
-    ts1 = now_dt.strftime("%Y-%m-%d %H:%M:%S WIB")
-    bbox_ts1 = draw.textbbox((0, 0), ts1, font=font_ts_top)
-    draw.text((width - 55 - (bbox_ts1[2] - bbox_ts1[0]), 196), ts1, fill=white, font=font_ts_top)
-
-    # 4. Daftar Kartu / Field
-    kualitas   = data.get("kualitas_jaringan", "Layak")
-    kecepatan  = data.get("kecepatan_internet", "Layak") or "Layak"
-    speed_ont  = data.get("ont_speed", "-") or "-"
-    lat        = data.get("odp_lat")
-    lon        = data.get("odp_long")
-    latlong    = f"{lat:.6f},{lon:.6f}" if (lat and lon) else "-"
-    jarak      = data.get("odp_distance_m")
-    jarak_str  = f"{jarak} m" if jarak is not None else "0 m"
-    odp_name   = data.get("odp_name") or "-"
-
-    items = [
-        ("Nomor Tiket / Permintaan", ticket),
-        ("Nomor Internet Anda", nd),
-        ("Kualitas Jaringan", kualitas),
-        ("Kecepatan Internet", kecepatan),
-        ("Speed Test ONT", speed_ont),
-        ("LatLong ODP", latlong),
-        ("Jarak ODP", jarak_str),
-        ("Nama ODP", odp_name),
-    ]
-
-    card_x  = 55
-    card_w  = width - (card_x * 2)
-    card_h  = 58
-    gap     = 14
-    split_x = card_x + int(card_w * 0.52)
-    start_y = 238
-
-    for i, (lbl, val) in enumerate(items):
-        y = start_y + i * (card_h + gap)
-        draw.rounded_rectangle([(card_x, y), (card_x + card_w, y + card_h)], radius=8, fill=white)
-        draw.rounded_rectangle([(card_x, y), (split_x, y + card_h)], radius=8, fill=gray_label)
-        draw.rectangle([(split_x - 10, y), (split_x, y + card_h)], fill=gray_label)
-        draw.line([(split_x, y), (split_x, y + card_h)], fill=border_color, width=1)
-
-        bbox_l = draw.textbbox((0, 0), lbl, font=font_label)
-        draw.text((card_x + 18, y + (card_h - (bbox_l[3] - bbox_l[1])) // 2 - 1), lbl, fill=text_gray, font=font_label)
-
-        val_str = str(val)
-        bbox_v = draw.textbbox((0, 0), val_str, font=font_val)
-        draw.text((split_x + 18, y + (card_h - (bbox_v[3] - bbox_v[1])) // 2 - 1), val_str, fill=text_dark, font=font_val)
-
-    # 5. Timestamp Bawah
-    curr_y = start_y + len(items) * (card_h + gap) + 6
-    ts2 = now_dt.strftime("%H:%M:%S WIB")
-    bbox_ts2 = draw.textbbox((0, 0), ts2, font=font_ts_bot)
-    draw.text((width - 55 - (bbox_ts2[2] - bbox_ts2[0]), curr_y), ts2, fill=white, font=font_ts_bot)
-
-    # 6. Verdict Message
-    curr_y += 45
-    draw.line([(55, curr_y), (width - 55, curr_y)], fill=(255, 255, 255, 90), width=1)
-    curr_y += 32
-    verdict = "Layanan internet anda dalam kondisi normal."
-    bbox_vd = draw.textbbox((0, 0), verdict, font=font_verdict)
-    draw.text(((width - (bbox_vd[2] - bbox_vd[0])) // 2, curr_y), verdict, fill=white, font=font_verdict)
-
-    # 7. Tombol OK
-    curr_y += 68
-    btn_w, btn_h = 132, 54
-    bx = (width - btn_w) // 2
-    draw.rounded_rectangle([(bx, curr_y), (bx + btn_w, curr_y + btn_h)], radius=6, fill=white)
-    bbox_ok = draw.textbbox((0, 0), "Ok", font=font_btn_ok)
-    draw.text((bx + (btn_w - (bbox_ok[2] - bbox_ok[0])) // 2, curr_y + (btn_h - (bbox_ok[3] - bbox_ok[1])) // 2 - 1), "Ok", fill=text_dark, font=font_btn_ok)
-
-    # 8. UID Hash
-    curr_y += 185
-    uid = data.get("_raw", {}).get("uid", "1789894156.430d9c5e5ac4e9b03243d9182b41a67ceda50773")
-    bbox_uid = draw.textbbox((0, 0), uid, font=font_uid)
-    draw.text(((width - (bbox_uid[2] - bbox_uid[0])) // 2, curr_y), uid, fill=(255, 255, 255, 210), font=font_uid)
-
-    # 9. Tombol Menu Utama Bawah
-    curr_y += 45
-    menu_h = 70
-    draw.rounded_rectangle([(card_x, curr_y), (card_x + card_w, curr_y + menu_h)], radius=12, fill=white, outline=border_color, width=1)
-    menu_text = "Kembali Ke Menu Utama"
-    bbox_m = draw.textbbox((0, 0), menu_text, font=font_menu)
-    total_w = 22 + 12 + (bbox_m[2] - bbox_m[0])
-    start_x = (width - total_w) // 2
-
-    _draw_arrow_left(draw, start_x, curr_y + menu_h // 2, size=18, color=(211, 47, 47))
-    draw.text((start_x + 34, curr_y + (menu_h - (bbox_m[3] - bbox_m[1])) // 2 - 1), menu_text, fill=(211, 47, 47), font=font_menu)
-
-    try:
-        img.save(output_path, "PNG")
-
-        # Segarkan MediaStore Android agar gambar langsung muncul di Galeri & Telegram
-        _scan_media_file(output_path)
-
-        return output_path
-    except Exception as e:
-        _log(f"⚠️  Gagal menyimpan gambar: {e}")
-        return None
-
-
 # ─── HTTP Helpers dengan Retry ────────────────────────────────────────────────
 
 def _post_with_retry(session_or_module, url: str, retries: int = 2, timeout: int = DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
@@ -450,7 +166,7 @@ def _post_with_retry(session_or_module, url: str, retries: int = 2, timeout: int
             if attempt < retries:
                 endpoint = url.split('/')[-1].split('?')[0] or url
                 _log(f"⚠️  Timeout/koneksi terputus ({endpoint}), mencoba ulang ({attempt}/{retries})...")
-                time.sleep(1.5)
+                time.sleep(0.5)
             else:
                 raise last_exc
 
@@ -466,7 +182,7 @@ def _get_with_retry(session_or_module, url: str, retries: int = 2, timeout: int 
             if attempt < retries:
                 endpoint = url.split('/')[-1].split('?')[0] or url
                 _log(f"⚠️  Timeout/koneksi terputus ({endpoint}), mencoba ulang ({attempt}/{retries})...")
-                time.sleep(1.5)
+                time.sleep(0.5)
             else:
                 raise last_exc
 
@@ -592,12 +308,13 @@ def check_scc(ticket_id: str,
         if ip_check.get("success"):
             result["is_bng"] = ip_check["data"].get("is_bng")
 
-        # Step 7: IP publik
+        # Step 7: IP publik (timeout cepat 2.0s dengan fallback)
         _log("Mengambil IP publik...")
-        for ip_url in ["https://myip.tacc.id", "https://myip.indihome.co.id"]:
+        for ip_url in ["https://myip.tacc.id", "https://myip.indihome.co.id", "https://api.ipify.org?format=json"]:
             try:
-                ip_r = session.get(ip_url, timeout=8)
-                result["ip_address"] = ip_r.json().get("ip_addr")
+                ip_r = session.get(ip_url, timeout=2.0)
+                data = ip_r.json()
+                result["ip_address"] = data.get("ip_addr") or data.get("ip")
                 if result["ip_address"]:
                     break
             except Exception:
@@ -644,14 +361,13 @@ def check_scc(ticket_id: str,
 
         # ODP Distance: jika lat/lon belum ada, jalankan auto-discovery ODP pintar
         jwt_token = None
-        effective_webhook = (webhook_url or N8N_ODP_WEBHOOK or "").strip()
         p_lat = probe_lat if probe_lat is not None else DEFAULT_PROBE_LAT
         p_lon = probe_lon if probe_lon is not None else DEFAULT_PROBE_LON
 
         if lat is None or lon is None:
             jwt_token, lat, lon = _auto_discover_odp(
                 session=session, uid=uid, result=result, timeout=timeout,
-                webhook_url=effective_webhook, probe_lat=p_lat, probe_lon=p_lon
+                probe_lat=p_lat, probe_lon=p_lon
             )
         else:
             jwt_token = _check_odp(session, uid, lat, lon, result, timeout)
@@ -767,13 +483,12 @@ def _check_odp(session, uid, lat, lon, result, timeout=DEFAULT_TIMEOUT) -> str |
 
 
 def _auto_discover_odp(session, uid, result: dict, timeout: int,
-                       webhook_url: str = None,
                        probe_lat: float = DEFAULT_PROBE_LAT,
                        probe_lon: float = DEFAULT_PROBE_LON) -> tuple[str | None, float | None, float | None]:
     """
     Auto-Discovery ODP Pintar (In-Flight):
     1. Memancing server Telkom menggunakan koordinat probe untuk membongkar nama ODP datek resmi & titik aslinya.
-    2. Langsung mencari ODP tetangga via Webhook n8n (atau offset alami ~35-65m dari titik Telkom jika n8n tidak ada).
+    2. Menghitung offset alami (~38-72m) langsung dari koordinat ODP Telkom.
     3. Mengirimkan ulang koordinat yang valid ke API jarak ODP sehingga radius menjadi valid (<= 1km).
     Return (jwt_token, resolved_lat, resolved_lon).
     """
@@ -794,34 +509,20 @@ def _auto_discover_odp(session, uid, result: dict, timeout: int,
 
     resolved_lat, resolved_lon = None, None
 
-    # Step 2: Cari ODP tetangga via webhook n8n
-    effective_webhook = (webhook_url or N8N_ODP_WEBHOOK or "").strip()
-    if effective_webhook:
-        _log(f"🔍 Mencari ODP tetangga untuk '{real_odp}' via n8n...")
-        ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(real_odp, webhook_url=effective_webhook)
-        if ok and n_lat is not None and n_lon is not None:
-            _log(f"🎲 Terpilih acak via n8n: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
-            resolved_lat, resolved_lon = n_lat, n_lon
-        else:
-            _log(f"⚠️  ODP '{real_odp}' tidak ditemukan di database n8n. Memakai koordinat Telkom + offset alami...")
-    else:
-        _log("ℹ️  Webhook n8n belum diatur. Memakai koordinat Telkom + offset alami...")
-
-    # Fallback jika n8n tidak menemukan ODP: gunakan koordinat Telkom + offset alami (~38 - 72m)
-    if resolved_lat is None or resolved_lon is None:
-        telkom_lat = result.get("odp_lat")
-        telkom_lon = result.get("odp_long")
-        if telkom_lat and telkom_lon:
-            try:
-                base_lat = float(telkom_lat)
-                base_lon = float(telkom_lon)
-                angle = random.uniform(0, 2 * math.pi)
-                radius_deg = random.uniform(0.00035, 0.00065)  # ~38 - 72 meter
-                resolved_lat = round(base_lat + radius_deg * math.cos(angle), 7)
-                resolved_lon = round(base_lon + radius_deg * math.sin(angle), 7)
-                _log(f"📍 Koordinat di-generate: ({resolved_lat}, {resolved_lon})")
-            except (ValueError, TypeError) as e:
-                _log(f"⚠️  Gagal memproses koordinat Telkom: {e}")
+    # Step 2: Hitung offset alami (~38 - 72m) langsung dari koordinat ODP Telkom
+    telkom_lat = result.get("odp_lat")
+    telkom_lon = result.get("odp_long")
+    if telkom_lat and telkom_lon:
+        try:
+            base_lat = float(telkom_lat)
+            base_lon = float(telkom_lon)
+            angle = random.uniform(0, 2 * math.pi)
+            radius_deg = random.uniform(0.00035, 0.00065)  # ~38 - 72 meter
+            resolved_lat = round(base_lat + radius_deg * math.cos(angle), 7)
+            resolved_lon = round(base_lon + radius_deg * math.sin(angle), 7)
+            _log(f"📍 Koordinat di-generate: ({resolved_lat}, {resolved_lon})")
+        except (ValueError, TypeError) as e:
+            _log(f"⚠️  Gagal memproses koordinat Telkom: {e}")
 
     # Step 3: Re-query jarak ODP menggunakan koordinat baru yang valid
     if resolved_lat is not None and resolved_lon is not None:
@@ -839,7 +540,6 @@ def _auto_discover_odp(session, uid, result: dict, timeout: int,
     return jwt_token, resolved_lat, resolved_lon
 
 
-# ─── Speedtest ────────────────────────────────────────────────────────────────
 
 def _run_speedtest(session, uid, jwt_token, lat, lon, result, timeout,
                    run_speedtest, auto_speed, manual_dl_mbps, manual_ul_mbps,
@@ -925,32 +625,7 @@ def _run_speedtest(session, uid, jwt_token, lat, lon, result, timeout,
     ul_kbps = _add_noise(int(ul_mbps * 1000))
     test_id = str(uuid.uuid4())
 
-    # Log ke mysiis.io (opsional)
-    if jwt_token:
-        try:
-            requests.post(
-                f"{MYSIIS_BASE}/history/bulk",
-                json={"history": [{
-                    "userId": "unique user id", "nd": result.get("nd", ""),
-                    "server_id": server_info["id"], "source": "web",
-                    "ip": result.get("ip_address", ""),
-                    "dl": dl_mbps, "ul": ul_mbps, "ping": ping, "jitter": jitter,
-                    "distance": 0, "latU": lat or 0, "longU": lon or 0,
-                    "odp_name": result.get("odp_name", ""),
-                    "odp_lat": result.get("odp_lat", 0), "odp_long": result.get("odp_long", 0),
-                    "odp_distance": result.get("odp_distance_m", 0),
-                    "odp_distance_status": "success", "odp_distance_message": "success",
-                    "start_timestamp": start_time.isoformat(),
-                    "end_timestamp": end_time.isoformat(),
-                    "testId": test_id, "isGlobalGateway": False,
-                }]},
-                headers={"Authorization": f"Bearer {jwt_token}", "apikey": MYSIIS_KEY,
-                         "Content-Type": "application/json",
-                         "referer": "https://speedtest-r-scc-v2.mysiis.io/"},
-                timeout=timeout,
-            )
-        except Exception:
-            pass
+
 
     # SaveSpeed → kirim ke SCC
     _log("Mengirim hasil speedtest ke SCC...")
@@ -1115,21 +790,6 @@ def _parse_lat_lon(coord_str: str) -> tuple[float | None, float | None]:
         pass
     return None, None
 
-
-def lookup_nearest_odp(odp_name: str, webhook_url: str = None) -> tuple:
-    """
-    Lookup kandidat ODP terdekat via Webhook n8n dan memilih 1 secara acak.
-
-    Parameter:
-        odp_name    : Nama ODP target (misal: "ODP-UBN-FAQ/01")
-        webhook_url : Override URL webhook n8n (opsional)
-
-    Returns:
-        (success: bool, lat: float|None, lon: float|None, chosen_pin: str|None, jarak_m: int|None, candidates: list)
-    """
-    url = (webhook_url or N8N_ODP_WEBHOOK or "").strip()
-    if not url:
-        return False, None, None, None, None, []
 
     if not odp_name or not odp_name.strip():
         return False, None, None, None, None, []
@@ -1307,32 +967,22 @@ def _retry_with_real_odp(ticket_id: str, res: dict, auto_speed: bool = True) -> 
         return None
 
     print(f"\n  🔄 Mengulangi pengecekan {ticket_id} dengan datek '{real_odp}'...")
-    print(f"  🔍 Mencari ODP tetangga untuk '{real_odp}' via n8n...")
-
-    ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(real_odp)
+    telkom_lat = res.get("odp_lat")
+    telkom_lon = res.get("odp_long")
     new_lat, new_lon = None, None
-    if ok:
-        print(f"  🎲 Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
-        new_lat, new_lon = n_lat, n_lon
+    if telkom_lat and telkom_lon:
+        try:
+            base_lat = float(telkom_lat)
+            base_lon = float(telkom_lon)
+            angle = random.uniform(0, 2 * math.pi)
+            radius_deg = random.uniform(0.00035, 0.00065)  # ~38 - 72 meter
+            new_lat = round(base_lat + radius_deg * math.cos(angle), 7)
+            new_lon = round(base_lon + radius_deg * math.sin(angle), 7)
+            print(f"  📍 Menggunakan koordinat datek Telkom + offset: ({new_lat}, {new_lon})")
+        except (ValueError, TypeError):
+            new_lat, new_lon = None, None
     else:
-        # Fallback jika datek tidak ditemukan di database n8n:
-        # Gunakan odpLat & odpLong dari SCC dengan offset alami (~35-65m)
-        telkom_lat = res.get("odp_lat")
-        telkom_lon = res.get("odp_long")
-        if telkom_lat and telkom_lon:
-            try:
-                base_lat = float(telkom_lat)
-                base_lon = float(telkom_lon)
-                import math
-                angle = random.uniform(0, 2 * math.pi)
-                radius_deg = random.uniform(0.00035, 0.00065)  # ~38 - 72 meter
-                new_lat = round(base_lat + radius_deg * math.cos(angle), 7)
-                new_lon = round(base_lon + radius_deg * math.sin(angle), 7)
-                print(f"  ℹ️  '{real_odp}' tidak ada di DB n8n. Menggunakan koordinat Telkom + offset alami: ({new_lat}, {new_lon})")
-            except (ValueError, TypeError):
-                new_lat, new_lon = None, None
-        else:
-            print(f"  ⚠️  Koordinat datek '{real_odp}' tidak dapat ditentukan.")
+        print(f"  ⚠️  Koordinat datek '{real_odp}' tidak dapat ditentukan.")
 
     res_retry = check_scc(
         ticket_id=ticket_id,
@@ -1342,10 +992,6 @@ def _retry_with_real_odp(ticket_id: str, res: dict, auto_speed: bool = True) -> 
         timeout=DEFAULT_TIMEOUT,
     )
     print_result(res_retry)
-    if res_retry.get("status") != "ERROR" and res_retry.get("nd"):
-        img_path = generate_scc_image(res_retry)
-        if img_path:
-            print(f"  🖼️  Gambar hasil SCC diperbarui: {img_path}\n\n")
 
     return res_retry
 
@@ -1384,14 +1030,7 @@ def _menu_speedtest() -> tuple:
 
 ASCII_BANNER = r"""
  ═════════════════════════════════════════════
-  ___ ___ ___   ___ _           _             
- / __/ __/ __| / __| |_  ___ __| |_____ _ _   
- \__ \__ \ (__| (__| ' \/ -_) _| / / -_) '_|  
- |___/___/\___|\___|_||_\___\__|_|_\___|_|    
- 
- ─────────────────────────────────────────────
-    ⚡ Service Completion Check Telkom ⚡
-              by freedom_seeker
+                    S C C
  ═════════════════════════════════════════════
 """
 
@@ -1406,11 +1045,8 @@ def _collect_interactive_tickets() -> list:
 
     Return list of dict, atau None jika user mengetik 'q' / 'exit'.
     """
-    print("\n  Masukkan Tiket / ODP / File:")
-    print("  • 1 tiket     : INC53473372,ODP-UBN-FAS/63")
-    print("  • Multi-tiket : Langsung paste daftar tiket (atau ketik 'm')")
-    print("  • Dari file   : tiket.txt")
-    print("  • Keluar      : q")
+    print("\n  Masukkan Tiket :")
+    print("  Keluar         : x")
 
     try:
         raw = input("\n  > ").strip()
@@ -1420,7 +1056,7 @@ def _collect_interactive_tickets() -> list:
     if not raw:
         return []
 
-    if raw.lower() in ("q", "quit", "exit", "keluar"):
+    if raw.lower() in ("x", "q", "quit", "exit", "keluar"):
         return None
 
     lines = []
@@ -1544,18 +1180,8 @@ def interactive_mode():
                 print(f"\n{'─'*54}")
                 print(f"  [{i+1}/{total}] Memproses {t_ticket}...")
 
-            if t_odp:
-                print(f"  🔍 Mencari ODP tetangga untuk '{t_odp}'...")
-                ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(t_odp)
-                if ok:
-                    print(f"  🎲 Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})")
-                    t_lat, t_lon = n_lat, n_lon
-                else:
-                    print(f"  ⚠️  ODP '{t_odp}' tidak ditemukan di database n8n. Menggunakan auto-discovery datek...")
-                    t_lat, t_lon = None, None
-            else:
-                if t_lat is None and t_lon is None:
-                    print(f"  🎣 Tiket tanpa ODP. Menjalankan auto-discovery datek Telkom...")
+            if t_lat is None and t_lon is None:
+                print(f"  🎣 Menjalankan auto-discovery datek Telkom...")
 
             res = check_scc(
                 ticket_id        = t_ticket,
@@ -1565,12 +1191,6 @@ def interactive_mode():
                 timeout          = DEFAULT_TIMEOUT,
             )
             print_result(res)
-
-            # Auto-generate gambar hasil SCC jika berhasil
-            if res.get("status") != "ERROR" and res.get("nd"):
-                img_path = generate_scc_image(res)
-                if img_path:
-                    print(f"  🖼️  Gambar hasil SCC disimpan: {img_path}\n\n")
 
             # Fallback jika jarak ODP terlalu jauh (>1km) / salah input datek
             res_datek = _retry_with_real_odp(t_ticket, res, auto_speed=True)
@@ -1588,8 +1208,6 @@ def interactive_mode():
                         print(f"\n  🔄 Mengulangi pengecekan untuk {t_ticket}...")
                         res_retry = check_scc(ticket_id=t_ticket, lat=t_lat, lon=t_lon, auto_speed=True, timeout=DEFAULT_TIMEOUT)
                         print_result(res_retry)
-                        if res_retry.get("status") != "ERROR" and res_retry.get("nd"):
-                            generate_scc_image(res_retry)
                         results.append(res_retry)
                         continue
             else:
@@ -1615,8 +1233,6 @@ def interactive_mode():
                         print(f"\n  🔄 Mengulangi pengecekan untuk {f_ticket}...")
                         res_retry = check_scc(ticket_id=f_ticket, lat=f_lat, lon=f_lon, auto_speed=True, timeout=DEFAULT_TIMEOUT)
                         print_result(res_retry)
-                        if res_retry.get("status") != "ERROR" and res_retry.get("nd"):
-                            generate_scc_image(res_retry)
             print(f"{'═'*54}")
 
         # Bersihkan sisa karakter/newline di buffer terminal agar prompt enter tidak langsung terlewat
@@ -1633,23 +1249,22 @@ def interactive_mode():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SCC Telkom Checker — cek layanan internet IndiHome tanpa browser",
+        description="SCC — cek layanan internet IndiHome tanpa browser",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Contoh:
-  python scc_checker.py                           # mode menu interaktif
-  python scc_checker.py INC53061310               # cek langsung
-  python scc_checker.py INC53061310 --lat -8.638 --lon 115.215 --speedtest
-  python scc_checker.py INC53061310 --dl 150 --ul 50
-  python scc_checker.py INC53061310 --auto-speed
-  python scc_checker.py --batch tiket.txt --output hasil.json
+  python scc.py                           # mode menu interaktif
+  python scc.py INC53061310               # cek langsung
+  python scc.py INC53061310 --lat -8.638 --lon 115.215 --speedtest
+  python scc.py INC53061310 --dl 150 --ul 50
+  python scc.py INC53061310 --auto-speed
+  python scc.py --batch tiket.txt --output hasil.json
         """,
     )
     parser.add_argument("ticket", nargs="?")
     parser.add_argument("--batch",       "-b", metavar="FILE")
     parser.add_argument("--nd",          metavar="ND")
-    parser.add_argument("--odp",         help="Nama ODP target (akan dicari nearest ODP via webhook n8n)")
-    parser.add_argument("--webhook",     "-w", help="URL Webhook n8n untuk nearest ODP lookup")
+    parser.add_argument("--odp",         help="Nama ODP target")
     parser.add_argument("--lat",         type=float,
                         help="Latitude (opsional)")
     parser.add_argument("--lon",         type=float,
@@ -1670,8 +1285,6 @@ Contoh:
                         help="Ping manual ms (default: 10)")
     parser.add_argument("--jitter",      type=float, default=1.0,
                         help="Jitter manual ms (default: 1)")
-    parser.add_argument("--image",       "-i", action="store_true",
-                        help="Generate gambar bukti SCC ke Documents/SCC")
     parser.add_argument("--output",      "-o", metavar="FILE")
     parser.add_argument("--json",        "-j", action="store_true")
     parser.add_argument("--no-raw",      action="store_true")
@@ -1688,8 +1301,7 @@ Contoh:
     if not args.json:
         print(ASCII_BANNER)
 
-    effective_webhook = (args.webhook or N8N_ODP_WEBHOOK or "").strip()
-
+    
     # Parse koordinat gabungan jika ada
     cli_lat = args.lat
     cli_lon = args.lon
@@ -1706,25 +1318,7 @@ Contoh:
         if p_lat is not None:
             cli_probe_lat, cli_probe_lon = p_lat, p_lon
 
-    # Jika --odp diberikan pada mode single
-    if args.odp and not args.batch:
-        if not effective_webhook:
-            print("⚠️  --odp diberikan tetapi URL webhook n8n belum diatur.", file=sys.stderr)
-            print("   Gunakan --webhook <URL> atau set environment variable SCC_ODP_WEBHOOK_URL.", file=sys.stderr)
-            print("   Melanjutkan pengecekan SCC tanpa ODP...\n", file=sys.stderr)
-        else:
-            print(f"🔍 Mencari ODP tetangga di sekitar '{args.odp}' via n8n...", file=sys.stderr)
-            ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(args.odp, webhook_url=effective_webhook)
-            if ok:
-                print(f"✅ Ditemukan {len(cand)} ODP tetangga:", file=sys.stderr)
-                for idx, c in enumerate(cand, 1):
-                    print(f"   {idx}. {c.get('pin_name')} (~{c.get('jarak_meter')}m)", file=sys.stderr)
-                print(f"🎲 Terpilih acak: {n_pin} (jarak ~{n_dist}m)", file=sys.stderr)
-                print(f"📍 Menggunakan koordinat: {n_lat}, {n_lon}\n", file=sys.stderr)
-                cli_lat, cli_lon = n_lat, n_lon
-            else:
-                print(f"⚠️  ODP '{args.odp}' tidak ditemukan di database n8n.", file=sys.stderr)
-                print(f"ℹ️  Melanjutkan pengecekan SCC tanpa koordinat ODP...\n", file=sys.stderr)
+
 
     # Ada argumen → mode CLI langsung
     batch_items = []
@@ -1755,21 +1349,7 @@ Contoh:
         if len(batch_items) > 1:
             print(f"\n[{i+1}/{len(batch_items)}] Mengecek {t_ticket}...", file=sys.stderr)
 
-        if t_odp:
-            if not effective_webhook:
-                print(f"⚠️  [{t_ticket}] ODP '{t_odp}' tertera tapi webhook n8n belum diatur. Melewati ODP...", file=sys.stderr)
-                t_lat, t_lon = None, None
-            else:
-                print(f"🔍 [{t_ticket}] Mencari ODP tetangga untuk '{t_odp}'...", file=sys.stderr)
-                ok, n_lat, n_lon, n_pin, n_dist, cand = lookup_nearest_odp(t_odp, webhook_url=effective_webhook)
-                if ok:
-                    print(f"🎲 [{t_ticket}] Terpilih acak: {n_pin} (~{n_dist}m) -> ({n_lat}, {n_lon})", file=sys.stderr)
-                    t_lat, t_lon = n_lat, n_lon
-                else:
-                    print(f"⚠️  [{t_ticket}] ODP '{t_odp}' tidak ditemukan di database n8n.", file=sys.stderr)
-                    print(f"ℹ️  Tetap melanjutkan pengecekan SCC tanpa koordinat ODP...", file=sys.stderr)
-                    t_lat, t_lon = None, None
-        elif t_lat is None and cli_lat is not None:
+        if t_lat is None and cli_lat is not None:
             t_lat, t_lon = cli_lat, cli_lon
 
         res = check_scc(
@@ -1784,8 +1364,7 @@ Contoh:
             manual_ping_ms   = args.ping,
             manual_jitter_ms = args.jitter,
             timeout          = args.timeout,
-            webhook_url      = effective_webhook,
-            probe_lat        = cli_probe_lat,
+                        probe_lat        = cli_probe_lat,
             probe_lon        = cli_probe_lon,
         )
 
@@ -1796,12 +1375,6 @@ Contoh:
             print(json.dumps(res, indent=2, ensure_ascii=False))
         else:
             print_result(res)
-
-        # Generate image jika diminta lewat argumen CLI --image / -i
-        if args.image and res.get("status") != "ERROR" and res.get("nd"):
-            img_path = generate_scc_image(res)
-            if img_path:
-                print(f"  🖼️  Gambar disimpan: {img_path}")
 
         # Fallback datek jika jarak ODP terlalu jauh (>1km)
         if not args.json:
@@ -1831,15 +1404,12 @@ Contoh:
                             manual_ping_ms   = args.ping,
                             manual_jitter_ms = args.jitter,
                             timeout          = args.timeout,
-                            webhook_url      = effective_webhook,
-                            probe_lat        = cli_probe_lat,
+                                                        probe_lat        = cli_probe_lat,
                             probe_lon        = cli_probe_lon,
                         )
                         if args.no_raw:
                             res.pop("_raw", None)
                         print_result(res)
-                        if args.image and res.get("status") != "ERROR" and res.get("nd"):
-                            generate_scc_image(res)
 
         results.append(res)
 

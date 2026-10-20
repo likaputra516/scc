@@ -8,7 +8,7 @@ Script Python ringan untuk mengecek hasil **SCC (Service Completion Check)** Tel
 
 ### Android (Termux)
 ```bash
-pkg update && pkg install git python python-pillow -y
+pkg update && pkg install git python  -y
 pip install -r requirements.txt
 ```
 
@@ -23,27 +23,27 @@ pip install -r requirements.txt
 
 ### Cek satu tiket
 ```bash
-python scc_checker.py INC53061310
+python scc.py INC53061310
 ```
 
 ### Cek satu tiket + langsung generate gambar bukti SCC
 ```bash
-python scc_checker.py INC53061310 --image
+python scc.py INC53061310 --image
 ```
 
 ### Cek satu tiket + koordinat ODP otomatis via nama ODP (Nearest ODP n8n)
 ```bash
-python scc_checker.py INC53061310 --odp ODP-UBN-FAQ/01 --auto-speed --image
+python scc.py INC53061310 --odp ODP-UBN-FAQ/01 --auto-speed --image
 ```
 
 ### Cek tiket + koordinat gabung (lat,lon) + auto speed + generate gambar
 ```bash
-python scc_checker.py INC53061310 --coord -8.638186,115.215263 --auto-speed --image
+python scc.py INC53061310 --coord -8.638186,115.215263 --auto-speed --image
 ```
 
 ### Cek batch banyak tiket dari file (+ format nama ODP / koordinat per baris)
 ```bash
-python scc_checker.py --batch contoh_tiket.txt --auto-speed --image
+python scc.py --batch contoh_tiket.txt --auto-speed --image
 ```
 Format file batch didukung:
 - `INC53061310` *(hanya tiket)*
@@ -52,17 +52,17 @@ Format file batch didukung:
 
 ### Output JSON (untuk integrasi program lain)
 ```bash
-python scc_checker.py INC53061310 --json
+python scc.py INC53061310 --json
 ```
 
 ### Simpan hasil ke file JSON
 ```bash
-python scc_checker.py INC53061310 --output hasil.json
+python scc.py INC53061310 --output hasil.json
 ```
 
 ### Cek batch + simpan ke JSON (tanpa field _raw)
 ```bash
-python scc_checker.py --batch contoh_tiket.txt --output semua_hasil.json --no-raw
+python scc.py --batch contoh_tiket.txt --output semua_hasil.json --no-raw
 ```
 
 ---
@@ -70,7 +70,7 @@ python scc_checker.py --batch contoh_tiket.txt --output semua_hasil.json --no-ra
 ## 📦 Sebagai Modul Python
 
 ```python
-from scc_checker import check_scc
+from scc import check_scc
 
 # Cek satu tiket
 result = check_scc("INC53061310")
